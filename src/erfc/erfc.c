@@ -41,7 +41,9 @@ SOFTWARE.
        Cambridge University Press, 2011.
 */
 
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
+#endif
 #include <stdint.h>
 
 // Warning: clang also defines __GNUC__

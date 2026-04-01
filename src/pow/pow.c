@@ -57,7 +57,9 @@ SOFTWARE.
 #include <stdio.h> // needed in case of rounding-test failure
 #include <stdint.h>
 #include <stdlib.h> // for exit
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
+#endif
 #include <fenv.h> // for fegetround, FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, ...
 #ifdef __x86_64__
 #include <x86intrin.h>
@@ -1785,7 +1787,7 @@ double cr_pow (double x, double y) {
   }
 
   if (y == 0.5)
-    return sqrt (x);
+    return __builtin_sqrt (x);
 
   if (y == 0.0)
     return 1.0;

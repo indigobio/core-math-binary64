@@ -1,6 +1,6 @@
 /* Correctly-rounded binary64 arcsine function.
 
-Copyright (c) 2022-2025 Alexei Sibidanov.
+Copyright (c) 2022-2026 Alexei Sibidanov <sibid@uvic.ca>.
 
 This file is part of the CORE-MATH project
 (https://core-math.gitlabpages.inria.fr/).
@@ -24,8 +24,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
-#include <fenv.h> // for FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, feraiseexcept...
+#endif
 #include <stdint.h>
 
 #ifdef __x86_64__
@@ -39,625 +40,327 @@ SOFTWARE.
 
 #pragma STDC FENV_ACCESS ON
 
-// This code emulates the _mm_getcsr SSE intrinsic by reading the FPCR register.
-// fegetexceptflag accesses the FPSR register, which seems to be much slower
-// than accessing FPCR, so it should be avoided if possible.
-// Adapted from sse2neon: https://github.com/DLTcollab/sse2neon
-#if defined(__arm64__) || defined(_M_ARM64) || defined(__aarch64__)
-#if defined(_MSC_VER)
-#include <arm64intr.h>
-#endif
-
-typedef struct
+/* __builtin_roundeven was introduced in gcc 10:
+   https://gcc.gnu.org/gcc-10/changes.html,
+   and in clang 17 */
+#if ((defined(__GNUC__) && __GNUC__ >= 10) || (defined(__clang__) && __clang_major__ >= 17)) && !defined(_MSC_VER) && (defined(__aarch64__) || defined(__x86_64__) || defined(__i386__))
+# define roundeven_finite(x) __builtin_roundeven (x)
+#else
+/* round x to nearest integer, breaking ties to even */
+static double
+roundeven_finite (double x)
 {
-  uint16_t res0;
-  uint8_t  res1  : 6;
-  uint8_t  bit22 : 1;
-  uint8_t  bit23 : 1;
-  uint8_t  bit24 : 1;
-  uint8_t  res2  : 7;
-  uint32_t res3;
-} fpcr_bitfield;
-
-inline static unsigned int get_arm_rounding_mode(void)
-{
-  union
+  double ix;
+# if (defined(__GNUC__) || defined(__clang__)) && (defined(__AVX__) || defined(__SSE4_1__) || (__ARM_ARCH >= 8))
+#  if defined __AVX__
+   __asm__("vroundsd $0x8,%1,%1,%0":"=x"(ix):"x"(x));
+#  elif __ARM_ARCH >= 8
+   __asm__ ("frintn %d0, %d1":"=w"(ix):"w"(x));
+#  else /* __SSE4_1__ */
+   __asm__("roundsd $0x8,%1,%0":"=x"(ix):"x"(x));
+#  endif
+# else
+  ix = __builtin_round (x); /* nearest, away from 0 */
+  if (__builtin_fabs (ix - x) == 0.5)
   {
-    fpcr_bitfield field;
-    uint64_t value;
-  } r;
-
-#if defined(_MSC_VER) && !defined(__clang__)
-  r.value = _ReadStatusReg(ARM64_FPCR);
-#else
-  __asm__ __volatile__("mrs %0, FPCR" : "=r"(r.value));
-#endif
-  static const unsigned int lut[2][2] = {{FE_TONEAREST, FE_UPWARD}, {FE_DOWNWARD, FE_TOWARDZERO}};
-  return lut[r.field.bit23][r.field.bit22];
+    /* if ix is odd, we should return ix-1 if x>0, and ix+1 if x<0 */
+    union { double f; uint64_t n; } u, v;
+    u.f = ix;
+    v.f = ix - __builtin_copysign (1.0, x);
+    if (__builtin_ctz (v.n) > __builtin_ctz (u.n))
+      ix = v.f;
+  }
+# endif
+  return ix;
 }
-#endif  // defined(__arm64__) || defined(_M_ARM64) || defined(__aarch64__)
-
-static inline int get_rounding_mode (void)
-{
-#if defined(__x86_64__)
-  #if defined(__WIN32__) || defined(__WIN64__)
-    // Windows 10 14393 swapped FE_UPWARD and FE_DOWNWARD.
-    // Before: FE_UPWARD = 0x0100, FE_DOWNWARD = 0x0200
-    // After:  FE_UPWARD = 0x0200, FE_DOWNWARD = 0x0100
-    // The amount we need to shift changes depending on the value.
-    #if FE_UPWARD == 0x0200
-      return _MM_GET_ROUNDING_MODE()>>5;
-    #elif FE_UPWARD == 0x0100
-      // Lookup table used to eliminate branches.
-      static const unsigned lut[4] = {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO};
-      return lut[_MM_GET_ROUNDING_MODE()>>13];
-    #else
-      #warning The floating point rounding constants have an unknown value. A slower path will be taken.
-      return fegetround();
-    #endif
-  #else
-    return _MM_GET_ROUNDING_MODE()>>3;
-  #endif
-#elif defined(__arm64__) || defined(_M_ARM64) || defined(__aarch64__)
-  return get_arm_rounding_mode();
-#else
-  return fegetround ();
-#endif
-}
-
-#if (defined(__clang__) && __clang_major__ >= 14) || (defined(__GNUC__) && __GNUC__ >= 14 && __BITINT_MAXWIDTH__ && __BITINT_MAXWIDTH__ >= 128)
-typedef unsigned _BitInt(128) u128;
-typedef _BitInt(128) i128;
-#else
-typedef unsigned __int128 u128;
-typedef __int128 i128;
 #endif
 
 typedef uint64_t u64;
 typedef int64_t i64;
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-typedef union {u128 a; struct {u64 bl, bh;};} u128_u;
-#else
-typedef union {u128 a; struct {u64 bh, bl;};} u128_u;
-#endif
+typedef unsigned short ushort;
 typedef union {double f; uint64_t u;} b64u64_u;
 
-inline static void shl(u128_u *a, int n){(*a).a <<= n;}
-inline static void shr(u128_u *a, int n){(*a).a >>= n;}
-
-inline static u64 muuh(u64 a, u64 b){return (a*(u128)b)>>64;}
-inline static i64 mh(i64 a, i64 b){return (i64)((a*(i128)b)>>64);}
-inline static i128 imul(i64 a, i64 b){return a*(i128)b;}
-inline static u128 mUU(u128 a, u128 b){
-  u128_u x = {.a = a}, y = {.a = b};
-  u128 o = x.bh*(u128)y.bh;
-  o += (u64)(x.bl*(u128)y.bh>>64);
-  o += (u64)(x.bh*(u128)y.bl>>64);
-  return o;
+static inline double fasttwosum(double x, double y, double *e){
+  double s = x + y, z = s - x;
+  *e = y - z;
+  return s;
 }
 
-inline static u128 muU(u64 a, u128 b){
-  u128_u y = {.a = b};
-  u128 o = a*(u128)y.bh;
-  o += a*(u128)y.bl>>64;
-  return o;
+static inline double fastsum(double xh, double xl, double yh, double yl, double *e){
+  double sl, sh = fasttwosum(xh, yh, &sl);
+  *e = (xl + yl) + sl;
+  return sh;
 }
 
-inline static u128 sqrU(u128 a){
-  u128_u x = {.a = a};
-  u128 os = x.bl*(u128)x.bh>>63;
-  u128 o = x.bh*(u128)x.bh;
-  return o + os;
+static inline double fasttwosub(double x, double y, double *e){
+  double s = x - y;
+  *e = (x - s) - y;
+  return s;
 }
 
-static u128 pasin(u128 x){
-  u64 xh = x>>64;
-  static const u64 b[] = {0x5ba2e8ba2e8ad9b7, 0x0004713b13b29079, 0x000000393331e196, 0x0000000002f5c315};
-  static const u128_u ch[] = {
-    {.bl = 0xaaaaaaaaaaaaaaa5, .bh = 0x0002aaaaaaaaaaaa}, // *+1
-    {.bl = 0x3333333333333484, .bh = 0x0000001333333333}, // *+1
-    {.bl = 0xb6db6db6db6da950, .bh = 0x0000000000b6db6d}, // *+1
-    {.bl = 0x1c71c71c71c76217, .bh = 0x00000000000007c7}, // *+1
-  };
-  u128_u t = ch[3];
-  t.bl += muuh(xh, b[0] + muuh(xh, b[1] + muuh(xh, b[2] + muuh(xh, b[3]))));
-  return mUU(x, ch[0].a + mUU(x, ch[1].a + mUU(x, ch[2].a + mUU(x, t.a))));
+static inline double muldd(double xh, double xl, double ch, double cl, double *l){
+  double ahhh = ch*xh;
+  *l = (cl*xh + ch*xl) + __builtin_fma(ch, xh, -ahhh);
+  return ahhh;
 }
 
-// assume |x| >= 2^-26 since the case |x| < 2^-26 is treated in the fast path
-static double asin_acc(double x){
-  static const u128_u s[] =
-    {{.bl = 0x4e29cf6e5fed0679, .bh = 0x648557de8d99f7e},
-     {.bl = 0x76a17954b2b7c517, .bh = 0xc8fb2f886ec09f3},
-     {.bl = 0xbeeeae8129a786b9, .bh = 0x12d52092ce19f5cc},
-     {.bl = 0xd8e72d912977ee71, .bh = 0x1917a6bc29b42be1},
-     {.bl = 0x4e08e535cadaf147, .bh = 0x1f564e56a9730e34},
-     {.bl = 0xc002a2684781f080, .bh = 0x259020dd1cc27444},
-     {.bl = 0x8ffbbceed62c7c43, .bh = 0x2bc42889167f8ca9},
-     {.bl = 0x9732300393f33614, .bh = 0x31f17078d34c156c},
-     {.bl = 0x43af186b79b2a0f3, .bh = 0x381704d4fc9ec5f9},
-     {.bl = 0x90887712e9dc9663, .bh = 0x3e33f2f642be355e},
-     {.bl = 0x4c20ab7aa99a2183, .bh = 0x4447498ac7d9dd82},
-     {.bl = 0xd725d3b9ed35fbaa, .bh = 0x4a5018bb567c16a2},
-     {.bl = 0x97c4afa25181e605, .bh = 0x504d72505d98050c},
-     {.bl = 0x408fca9cc277fc1f, .bh = 0x563e69d6ac7f73f8},
-     {.bl = 0x4e61f79b3a36f1dc, .bh = 0x5c2214c3e9167abb},
-     {.bl = 0x98916152cf7eee1c, .bh = 0x61f78a9abaa58b46},
-     {.bl = 0xd409485edd56b172, .bh = 0x67bde50ea3b628b6},
-     {.bl = 0x9b165cba0c171818, .bh = 0x6d744027857300ad},
-     {.bl = 0x1439670dfe3d68e6, .bh = 0x7319ba64c711785a},
-     {.bl = 0x362474f1a105878f, .bh = 0x78ad74e01bd8ec78},
-     {.bl = 0x13e03e4889485c69, .bh = 0x7e2e936fe26ae7ed},
-     {.bl = 0xbfd79717f2880abf, .bh = 0x839c3cc917ff6cb4},
-     {.bl = 0xb892ca8361d8c84c, .bh = 0x88f59aa0da591421},
-     {.bl = 0xbba4cfecbff54867, .bh = 0x8e39d9cd73464364},
-     {.bl = 0xb17821911e71c16e, .bh = 0x93682a66e896f544},
-     {.bl = 0x19cec845ac87a5c6, .bh = 0x987fbfe70b81a708},
-     {.bl = 0xe25e39549638ae68, .bh = 0x9d7fd1490285c9e3},
-     {.bl = 0x3b5167ee359a234e, .bh = 0xa267992848eeb0c0},
-     {.bl = 0x149f6e75993468a3, .bh = 0xa73655df1f2f489e},
-     {.bl = 0x1becda8089c1a94c, .bh = 0xabeb49a46764fd15},
-     {.bl = 0xe4cad00d5c94bcd2, .bh = 0xb085baa8e966f6da},
-     {.bl = 0x597d89b3754abe9f, .bh = 0xb504f333f9de6484},
-     {.bl = 0x9de1e3b22b8bf4db, .bh = 0xb96841bf7ffcb21a},
-     {.bl = 0xac85320f528d6d5d, .bh = 0xbdaef913557d76f0},
-     {.bl = 0xbdf0715cb8b20bd7, .bh = 0xc1d8705ffcbb6e90},
-     {.bl = 0x43da25d99267326b, .bh = 0xc5e40358a8ba05a7},
-     {.bl = 0x8335241be1693225, .bh = 0xc9d1124c931fda7a},
-     {.bl = 0x23af31db7179a4aa, .bh = 0xcd9f023f9c3a059e},
-     {.bl = 0x744fea20e8abef92, .bh = 0xd14d3d02313c0eed},
-     {.bl = 0xf630e8b6dac83e69, .bh = 0xd4db3148750d1819},
-     {.bl = 0x24b9fe00663574a4, .bh = 0xd84852c0a80ffcdb},
-     {.bl = 0x2c19b63253da43fc, .bh = 0xdb941a28cb71ec87},
-     {.bl = 0x4b19aa71fec3ae6d, .bh = 0xdebe05637ca94cfb},
-     {.bl = 0xf4e8a8372f8c5810, .bh = 0xe1c5978c05ed8691},
-     {.bl = 0x122785ae67f5515d, .bh = 0xe4aa5909a08fa7b4},
-     {.bl = 0x125129529d48a92f, .bh = 0xe76bd7a1e63b9786},
-     {.bl = 0x15ad45b4a1b5e823, .bh = 0xea09a68a6e49cd62},
-     {.bl = 0x7e610231ac1d6181, .bh = 0xec835e79946a3145},
-     {.bl = 0x86f8c20fb664b01b, .bh = 0xeed89db66611e307},
-     {.bl = 0x67127db35b287316, .bh = 0xf1090827b43725fd},
-     {.bl = 0xa5486bdc455d56a2, .bh = 0xf314476247088f74},
-     {.bl = 0x163c5c7f03b718c5, .bh = 0xf4fa0ab6316ed2ec},
-     {.bl = 0x2c791f59cc1ffc23, .bh = 0xf6ba073b424b19e8},
-     {.bl = 0xc7adc6b4988891bb, .bh = 0xf853f7dc9186b952},
-     {.bl = 0x4504ae08d19b2980, .bh = 0xf9c79d63272c4628},
-     {.bl = 0x2172a361fd2a722f, .bh = 0xfb14be7fbae58156},
-     {.bl = 0x256778ffcb5c1769, .bh = 0xfc3b27d38a5d49ab},
-     {.bl = 0xeae6bd951c1dabbe, .bh = 0xfd3aabf84528b50b},
-     {.bl = 0x90cd1d959db674ef, .bh = 0xfe1323870cfe9a3d},
-     {.bl = 0x41390efdc726e9ef, .bh = 0xfec46d1e89292cf0},
-     {.bl = 0xf668633f1ab858a, .bh = 0xff4e6d680c41d0a9},
-     {.bl = 0x421e8edaaf59453e, .bh = 0xffb10f1bcb6bef1d},
-     {.bl = 0x5657552366961732, .bh = 0xffec4304266865d9}
-    };
-    
-#define X1 0x1.fff8133aa33e4p-1
-
-  const unsigned rm = get_rounding_mode ();
-  b64u64_u t = {.f = x};
-  int se = (((i64)t.u>>52)&0x7ff)-0x3ff; // -26 <= se
-  i64 xsign = t.u&((u64)1<<63);
-  double ax = __builtin_fabs(x);
-  u128_u fi;
-  u64 sm = (t.u<<11)|(u64)1<<63;
-  u128_u sm2 = {.a = (u128)sm * sm};
-  if(__builtin_expect(ax<0.0131875,0)) { // then -26 <= se <= -7
-    int ss = 2*se; // -52 <= ss <= -14
-    sm2.a >>= -14 - ss; // the shift is well defined since 0 <= -14 - ss <= 38
-    u128 Sm = (u128)(sm>>1)<<64;
-    fi.a = Sm + muU(sm>>1, pasin(sm2.a));
-    se += 0x3ff;
-  } else { // |x| >= 0.0131875, -7 <= se <= -1
-    double xx = __builtin_fma(x,-x,1.0);
-    b64u64_u ixx = {.f = 1.0/xx}, c = {.f = __builtin_sqrt(xx)};
-    ixx.f *= c.f;
-    double x2 = x*x;
-    static const double ch[] = {0x1.ffb77e06e54aap+5, -0x1.3b200d87cc0fep+5, 0x1.79457faf679e3p+4, -0x1.dc7d5a91dfb7ep+2};
-    double c0 = ch[0] + ax*ch[1];
-    double c2 = ch[2] + ax*ch[3];
-    c0 += x2*c2;
-    b64u64_u ic = {.f = c0*c.f + 64.0};
-    int indx = ((ic.u&(~0ull>>12)) + ((i64)1<<(52-7)))>>(52-6);
-    u64 cm = (c.u<<11)|(u64)1<<63; int ce = ((i64)c.u>>52) - 0x3ff;
-    u128_u cm2 = {.a = (u128)cm * cm};
-    const int off = 36 - 22 + 14;
-    int ss = 128 - 104 + 2*se + off;
-    shl(&sm2, ss);
-    int sc = 128 - 104 + 2*ce + off;
-    shl(&cm2, sc);
-    sm2.a += cm2.a;
-    i64 h = sm2.bh;
-    u64 ixm = (ixx.u&(~0ull>>12))|(i64)1<<52; int ixe = ((i64)ixx.u>>52) - 0x3ff;
-    i64 dc = mh(h, ixm);
-    u128_u dsm2 = {.a = (u128)imul(dc,cm>>1)};
-    dsm2.a <<= 13;
-    sm2.a -= dsm2.a;
-    u128_u dsm3 = {.a = (u128)imul(dc,dc)};
-    sc = 28 - ixe*2;
-    if(__builtin_expect(sc>=0, 1))
-      shr(&dsm3, sc);
-    else
-      dsm3.a <<= -sc; // since sc < 0, the shift by -sc is legitimate
-    sm2.a += dsm3.a;
-    int k = ixe-ce;
-    ss = 24 + k;
-    u128_u Cm = {.bl = 0, .bh = cm},
-      D = {.bl = (u64)dc << ss, .bh = (u64)(dc>>(64-ss))};
-    Cm.a -= D.a;
-    h = sm2.a>>14;
-    dc = mh(h, ixm);
-    ss = 26-k;
-    if(__builtin_expect(ss>=0,1))
-      Cm.a -= (i128)dc>> ss;
-    else
-      Cm.a -= (u128)dc<<-ss; // since ss < 0, the shift by -ss is legitimate
-    fi.bl = 0xd313198a2e037073;
-    fi.bh = 0x3243f6a8885a308;
-    fi.a *= (u64)(64u - indx);
-    if(__builtin_expect(indx==0, 0)){
-      shr(&Cm, -ce-7);
-      u128 c2a = sqrU(Cm.a);
-      u128_u z = {.a = pasin(c2a)};
-      Cm.a += mUU(Cm.a, z.a);
-      fi.a -= Cm.a>>7;
-    } else {
-      i128 v = muU(sm>>-se, s[indx-1].a) - (mUU(Cm.a,s[63-indx].a)>>-ce), msk = v>>127, v2 = sqrU(v) - (msk&(v+v)); // since se<0 and ce<0, the shifts by -se and -ce are legitimate
-      v2 = (u128)v2 << 14;
-      u128 p = pasin(v2);
-      v += mUU(p,v)-(msk&p);
-      fi.a += v;
-    }
-    se = 0x3fe;
+static inline double polydd(double xh, double xl, int n, const double c[][2], double *l){
+  int i = n-1;
+  double ch = fasttwosum(c[i][0], *l, l), cl = c[i][1] + *l;
+  while(--i>=0){
+    ch = muldd(xh,xl, ch,cl, &cl);
+    ch = fastsum(c[i][0],c[i][1], ch,cl, &cl);
   }
-  int nz = __builtin_clzll(fi.bh);
-  u64 rnd;
-  if(__builtin_expect(rm==FE_TONEAREST, 1)){
-    rnd = (fi.bh>>(10-nz))&1;
-  } else if(rm==FE_DOWNWARD){
-    rnd =  (u64)xsign>>63;
-  } else if(rm==FE_UPWARD){
-    rnd =  ((u64)xsign>>63)^1;
-  } else {
-    rnd = 0;
-  }
-  volatile double k0 = 1.0, __attribute__((unused)) k = k0 + 0x1p-1022;
-  t.u = (fi.bh>>(11-nz))+(((u64)se-nz)<<52|xsign|rnd);
-  return t.f;
+  *l = cl;
+  return ch;
 }
+
+static double __attribute__((noinline,cold)) as_asin_refine(double, double);
+static double __attribute__((noinline,cold)) as_asin_database(double, double);
 
 double cr_asin(double x){
-  /* For 0 <= i <= 64, s[i]=floor(sin(pi/2*i/64)*2^63), except for i=64
-     where s[i]=2^63-1.
-     Thus s[i]/2^63 approximates sin(pi/2*i/64)=cos(pi/2*(64-i)/64).
-     We use only 63 bits since we use it as a signed value.
-     The maximal difference between s[i] and sin(pi/2*i/64)*2^63 is 1
-     (for i=64). */
-  static const u64 s[] = {
-    0, 0x3242abef46ccfbf, 0x647d97c437604f9, 0x96a9049670cfae6, 
-    0xc8bd35e14da15f0, 0xfab272b54b9871a, 0x12c8106e8e613a22, 0x15e214448b3fc654, 
-    0x18f8b83c69a60ab6, 0x1c0b826a7e4f62fc, 0x1f19f97b215f1aaf, 0x2223a4c563eceec1, 
-    0x25280c5dab3e0b51, 0x2826b9282ecc0286, 0x2b1f34eb563fb9fc, 0x2e110a61f48b3d5d, 
-    0x30fbc54d5d52c5a3, 0x33def28751db145b, 0x36ba2013c2b98056, 0x398cdd326388bc2d, 
-    0x3c56ba700dec763c, 0x3f1749b7f13573f6, 0x41ce1e648bffb65a, 0x447acd506d2c8a10, 
-    0x471cece6b9a321b2, 0x49b41533744b7aa2, 0x4c3fdff385c0d384, 0x4ebfe8a48142e4f1, 
-    0x5133cc9424775860, 0x539b2aef8f97a44f, 0x55f5a4d233b27e8a, 0x5842dd5474b37b6d, 
-    0x5a827999fcef3242, 0x5cb420dfbffe590d, 0x5ed77c89aabebb78, 0x60ec382ffe5db748, 
-    0x62f201ac545d02d3, 0x64e88926498fed3d, 0x66cf811fce1d02cf, 0x68a69e81189e0776, 
-    0x6a6d98a43a868c0c, 0x6c2429605407fe6d, 0x6dca0d1465b8f643, 0x6f5f02b1be54a67d, 
-    0x70e2cbc602f6c348, 0x72552c84d047d3da, 0x73b5ebd0f31dcbc3, 0x7504d3453724e6b1, 
-    0x7641af3cca3518a2, 0x776c4edb3308f183, 0x78848413da1b92fe, 0x798a23b1238447ba, 
-    0x7a7d055b18b76976, 0x7b5d039da1258cf4, 0x7c29fbee48c35ca9, 0x7ce3ceb193962314, 
-    0x7d8a5f3fdd72c0ab, 0x7e1d93e9c52ea4d5, 0x7e9d55fc22945a85, 0x7f0991c3867f4d1e, 
-    0x7f62368f44949678, 0x7fa736b40620e854, 0x7fd8878de5b5f78e, 0x7ff62182133432ec, ~0ull>>1 };
-  /* For 0 <= i <= 64, sh[i] = round(sin(i*pi/2/64)*2^69) mod 2^64,
-     with maximal error < 0.496 (for i=17). */
-  static const u64 sh[] = {
-    0, 0xc90aafbd1b33efca, 0x91f65f10dd813e6f, 0x5aa41259c33eb998, 
-    0x22f4d78536857c3b, 0xeac9cad52e61c68a, 0xb2041ba3984e8898, 0x78851122cff19532, 
-    0x3e2e0f1a6982ad93, 0x2e09a9f93d8bf28, 0xc67e5ec857c6abd2, 0x88e93158fb3bb04a, 
-    0x4a03176acf82d45b, 0x9ae4a0bb300a193, 0xc7cd3ad58fee7f08, 0x8442987d22cf576a, 
-    0x3ef1535754b168d3, 0xf7bca1d476c516db, 0xae8804f0ae6015b3, 0x63374c98e22f0b43, 
-    0x15ae9c037b1d8f07, 0xc5d26dfc4d5cfda2, 0x73879922ffed9698, 0x1eb3541b4b228437, 
-    0xc73b39ae68c86c97, 0x6d054cdd12dea896, 0xff7fce17034e103, 0xaffa292050b93c7c, 
-    0x4cf325091dd61807, 0xe6cabbe3e5e913c3, 0x7d69348cec9fa2a3, 0x10b7551d2cdedb5d, 
-    0xa09e667f3bcc908b, 0x2d0837efff964354, 0xb5df226aafaede16, 0x3b0e0bff976dd218, 
-    0xbc806b151740b4e8, 0x3a22499263fb4f50, 0xb3e047f38740b3c4, 0x29a7a0462781ddaf, 
-    0x9b66290ea1a3033f, 0x90a581501ff9b65, 0x728345196e3d90e6, 0xd7c0ac6f95299f69, 
-    0x38b2f180bdb0d23f, 0x954b213411f4f682, 0xed7af43cc772f0c2, 0x4134d14dc939ac43, 
-    0x906bcf328d4628b0, 0xdb13b6ccc23c60f1, 0x212104f686e4bfad, 0x6288ec48e111ee95, 
-    0x9f4156c62dda5d83, 0xd740e76849633d06, 0xa7efb9230d72a59, 0x38f3ac64e588c509, 
-    0x6297cff75cb02ac4, 0x8764fa714ba93565, 0xa7557f08a516a17d, 0xc26470e19fd347b2, 
-    0xd88da3d125259e08, 0xe9cdad01883a1522, 0xf621e3796d7de3a8, 0xfd886084cd0cbb2b, 0};
-  /* a[0]...a[3] are approximations of the Taylor coefficients of
-     2^68*asin(x/2^4) at x=0 of order 3, ..., 9. */
-  static const u64 a[] = {0x002aaaaaaaaaaaaa, 0x0000133333333344, 0x0000000b6db6d69d, 0x0000000007c7aa6f};
-  /* b[0]...b[4] are approximations towards zero of the Taylor coefficients of
-     2^84*asin(x/2^6) at x=0 of order 3, ..., 11.
-     The corresponding polynomial has a maximal absolute error
-     less than 2^-82.731 with respect to asin(x)-x over [0,2^-6].
-     Since coefficients are rounded towards zero, and the evaluation is also
-     rounded towards zero (using integer arithmetic), this guarantees the
-     final approximation is a lower bound of asin(x). */
-  static const u64 b[] = {0xaaaaaaaaaaaaaaaa, 0x0004cccccccccccc, 0x0000002db6db6db6, 0x0000000001f1c71c, 0x00000000000016e8};
-  /* pi/2*sqrt(1-x^2)*(ch[0]*x + ch[1]*x^2 + ch[2]*x^3 + ch[3]*x^4) is a rough
-     approximation of 64*acos(x) for 0 <= x <= 1, with error less than 0.056 */
-  static const double ch[] = {0x1.ffb77e06e54aap+5, -0x1.3b200d87cc0fep+5, 0x1.79457faf679e3p+4, -0x1.dc7d5a91dfb7ep+2};
-  const unsigned rm = get_rounding_mode ();
+  // coefficients of a polynomial approximation of asin(x):
+  // asin(x) = x*(cc[j][0] + cc[j][1] + t*P(t, cc[j] + 2))
+  // where t = x^2 - j/128
+  static const double cc[][8] = {
+    {                   1,                      0, 0x1.5555555555555p-3, 0x1.33333333333e4p-4,
+     0x1.6db6db6d31f82p-5, 0x1.f1c71f6889397p-6, 0x1.6e874b7045b46p-6, 0x1.1f753132271e2p-6},
+    {0x1.0055a27e0d033p+0, -0x1.d9ba10494c062p-54, 0x1.57c00cb5d6c4dp-3, 0x1.37881f5649a75p-4,
+     0x1.759af49d494ddp-5, 0x1.002e1864dda2ep-5, 0x1.7c2d5d468cdd9p-6, 0x1.292834c025357p-6},
+    {0x1.00abe0c129e1ep+0,  0x1.7ceb0ee49d42ap-57, 0x1.5a3385d5c7ba5p-3, 0x1.3bf51056f6637p-4,
+     0x1.7dba76b124b37p-5, 0x1.07be4b02e94c4p-5, 0x1.8a6bb92513f01p-6, 0x1.36afd4c615aecp-6},
+    {0x1.0102bcffd6acdp+0, -0x1.c2294c65d2e86p-55, 0x1.5caff17351901p-3, 0x1.407abbc04feb3p-4,
+     0x1.86179b8005949p-5, 0x1.0f97520bd4e72p-5, 0x1.9950c5c89f3dfp-6, 0x1.44f2344e7b664p-6},
+    {0x1.015a397cf0f1cp+0, -0x1.eebd6ccfe3ee3p-55, 0x1.5f3581be7b08bp-3, 0x1.4519ddf1ae531p-4,
+     0x1.8eb4b6ee35e92p-5, 0x1.17bc85414cd46p-5, 0x1.a8e5895e3fcf9p-6, 0x1.53fafdc629400p-6},
+    {0x1.01b2588811eebp+0,  0x1.7193e5d0a915fp-59, 0x1.61c46a67205d2p-3, 0x1.49d33a6eeae0bp-4,
+     0x1.979438563c014p-5, 0x1.20316ae977f05p-5, 0x1.b9339afb53aa4p-6, 0x1.63d6b02c42d0ap-6},
+    {0x1.020b1c7df0575p+0, -0x1.dd547e329c1e5p-55, 0x1.645ce0ab901bbp-3, 0x1.4ea79c34fc7a6p-4,
+     0x1.a0b8ac08940ecp-5, 0x1.28f9babd0629bp-5, 0x1.ca452cf90a55ep-6, 0x1.7492b016730efp-6},
+    {0x1.026487c8c5d71p+0, -0x1.5fd9b68dc3b6ep-54, 0x1.66ff1b67d5d70p-3, 0x1.5397d613373ebp-4,
+     0x1.aa24bce3aeb4ap-5, 0x1.3219610b150acp-5, 0x1.dc251825103f1p-6, 0x1.863d5a3932532p-6},
+    {0x1.02be9ce0b87cdp+0,  0x1.e5d09da2e0f04p-56, 0x1.69ab5325bc359p-3, 0x1.58a4c3097aab3p-4,
+     0x1.b3db3605f46f2p-5, 0x1.3b94821742cabp-5, 0x1.eedee7da72a15p-6, 0x1.98e6179a3e9a0p-6},
+    {0x1.03195e4c483f1p+0, -0x1.5db10ad66eacbp-54, 0x1.6c61c22d908f0p-3, 0x1.5dcf46ab9f2cbp-4,
+     0x1.bddf049bb1f4dp-5, 0x1.456f7db6ac768p-5, 0x1.013f738bd7bb3p-5, 0x1.ac9d739783d21p-6},
+    {0x1.0374cea0c0c9fp+0, -0x1.917bff5241c76p-54, 0x1.6f22a497b2ec0p-3, 0x1.63184d8a79db5p-4,
+     0x1.c83339caf946ep-5, 0x1.4faef331019d4p-5, 0x1.0b8917547d678p-5, 0x1.c17533f147e1cp-6},
+    {0x1.03d0f082afcc8p+0, -0x1.018bbcddb49ebp-54, 0x1.71ee385efdf06p-3, 0x1.6880cda2d3885p-4,
+     0x1.d2db0cbfae54dp-5, 0x1.5a57c56b50c5ep-5, 0x1.16535a40098b2p-5, 0x1.d780730b8ebb8p-6},
+    {0x1.042dc6a65ffbfp+0, -0x1.c7ea28dce95d1p-55, 0x1.74c4bd7412f9ep-3, 0x1.6e09c6d2b72bcp-4,
+     0x1.ddd9dcda253dep-5, 0x1.656f1f62b5001p-5, 0x1.21a5ae2ac77eep-5, 0x1.eed3bca067f0ep-6},
+    {0x1.048b53d05907bp+0,  0x1.634fffed6e2a6p-54, 0x1.77a675d1978bep-3, 0x1.73b4435583415p-4,
+     0x1.e9333402ebbf3p-5, 0x1.70fa78fd9f73fp-5, 0x1.2d8804d934fe1p-5, 0x1.03c29691a281cp-5},
+    {0x1.04e99ad5e4bcdp+0, -0x1.e97a72fe827e0p-54, 0x1.7a93a5917200cp-3, 0x1.7981584731c05p-4,
+     0x1.f4eac9268fae2p-5, 0x1.7cff9c3b19721p-5, 0x1.3a02d9c1e0145p-5, 0x1.10d64a0e56953p-5},
+    {0x1.05489e9d99995p+0,  0x1.d177637ec6a2bp-55, 0x1.7d8c930314681p-3, 0x1.7f72262f532e4p-4,
+     0x1.0082416e39013p-4, 0x1.8984aac80ddf4p-5, 0x1.471f3caf18eb8p-5, 0x1.1eb1cce6dd570p-5},
+    {0x1.05a8621feb16bp+0, -0x1.e5b33b1407c5fp-56, 0x1.809186c2e57ddp-3, 0x1.8587d99442dc8p-4,
+     0x1.06c23d1dfcb7fp-4, 0x1.969024036dd22p-5, 0x1.54e6dd4d2af33p-5, 0x1.2d62f439f2a31p-5},
+    {0x1.0608e867bff30p+0,  0x1.cbef5d8580027p-55, 0x1.83a2cbd2d8ba2p-3, 0x1.8bc3ab9724c6ep-4,
+     0x1.0d377ef1e0c39p-4, 0x1.a428eb7addf84p-5, 0x1.636417bc01ff2p-5, 0x1.3cf8acc7eb2a0p-5},
+    {0x1.066a34930ec8dp+0, -0x1.480f445fedad1p-54, 0x1.86c0afb447a74p-3, 0x1.9226e29948d9cp-4,
+     0x1.13e44a9b5a3a6p-4, 0x1.b2564fea8b3fep-5, 0x1.72a2023d92458p-5, 0x1.4d8313cec3485p-5},
+    {0x1.06cc49d38146cp+0, -0x1.b55394f4fc07bp-55, 0x1.89eb82831feedp-3, 0x1.98b2d2eb9bb23p-4,
+     0x1.1acb01e9ab414p-4, 0x1.c12012cbd00c6p-5, 0x1.82ac7c1d15c38p-5, 0x1.5f13925c6edcap-5},
+    {0x1.072f2b6f1e601p+0, -0x1.2dcbb05419970p-54, 0x1.8d2397127aebbp-3, 0x1.9f68df88da51dp-4,
+     0x1.21ee26a4f62a1p-4, 0x1.d08e707f7ae6fp-5, 0x1.93903dee3feb0p-5, 0x1.71bcfb5c57b59p-5},
+    {0x1.0792dcc0fbd20p+0, -0x1.5bf23ee4f9d54p-56, 0x1.9069430ab508ap-3, 0x1.a64a7adb4cd85p-4,
+     0x1.29505c8b48349p-4, 0x1.e0aa2921cfa60p-5, 0x1.a55aeb46f4322p-5, 0x1.8593acad3becep-5},
+    {0x1.07f76139f761dp+0,  0x1.fa1046481bb82p-54, 0x1.93bcdf091cca6p-3, 0x1.ad59278edc42fp-4,
+     0x1.30f46b7261652p-4, 0x1.f17c8a17c843ep-5, 0x1.b81b2619e15b5p-5, 0x1.9aadb395f5ae4p-5},
+    {0x1.085cbc61783c1p+0,  0x1.0a6e9efa20176p-54, 0x1.971ec6c1531e4p-3, 0x1.b496797068912p-4,
+     0x1.38dd419140184p-4, 0x1.0187bc3357bbbp-4, 0x1.cbe0a3dcafe26p-5, 0x1.b122f4fa499d0p-5},
+    {0x1.08c2f1d638e4cp+0,  0x1.b47c159534a3dp-56, 0x1.9a8f592078624p-3, 0x1.bc04165b57ab2p-4,
+     0x1.410df5f4bed1dp-4, 0x1.0ab6bdf478c71p-4, 0x1.e0bc44a945c64p-5, 0x1.c90d59bcd5701p-5},
+    {0x1.092a054f1a2fcp+0, -0x1.2f657224e9830p-54, 0x1.9e0ef87243a2cp-3, 0x1.c3a3b7366a278p-4,
+     0x1.4989cb22e2175p-4, 0x1.1450e5ba7ad39p-4, 0x1.f6c02c8f0ef93p-5, 0x1.e288ffc8d182cp-5},
+    {0x1.0991fa9bffbf4p+0, -0x1.ca1140a1abbf4p-58, 0x1.a19e0a8823b80p-3, 0x1.cb772900f9c24p-4,
+     0x1.525431f0cbb2ep-4, 0x1.1e5c2d06804e1p-4, 0x1.06ffefa7aa6b8p-4, 0x1.fdb4704dca347p-5},
+    {0x1.09fad5a6b68f9p+0,  0x1.aa1f06e92964ep-56, 0x1.a53cf8e28c50ep-3, 0x1.d3804df1de350p-4,
+     0x1.5b70cc8fa98dcp-4, 0x1.28def298c979bp-4, 0x1.13482f6347eebp-4, 0x1.0d586de48358cp-4},
+    {0x1.0a649a73e61f2p+0,  0x1.74ac0d817e9c7p-55, 0x1.a8ec30dc93891p-3, 0x1.dbc11ea950625p-4,
+     0x1.64e371d5616d3p-4, 0x1.33e0023936249p-4, 0x1.204426263066ap-4, 0x1.1cd12e4629723p-4},
+    {0x1.0acf4d240ccc4p+0,  0x1.da890f3b40bd3p-54, 0x1.acac23da07797p-3, 0x1.e43bab7741a98p-4,
+     0x1.6eb030c631819p-4, 0x1.3f669d2eb516ep-4, 0x1.2e0006ae505aep-4, 0x1.2d58204457c82p-4},
+    {0x1.0b3af1f4880bbp+0,  0x1.f450fb78d32bap-56, 0x1.b07d4778263afp-3, 0x1.ecf21db7be0efp-4,
+     0x1.78db5465013e4p-4, 0x1.4b7a8376f0996p-4, 0x1.3c88f9f2ef221p-4, 0x1.3f02ad9eb9753p-4},
+    {0x1.0ba78d40a9260p+0, -0x1.57b07a441e242p-54, 0x1.b46015c126262p-3, 0x1.f5e6b94713f3dp-4,
+     0x1.836967d0afecfp-4, 0x1.5823fdd1707b9p-4, 0x1.4bed355269dc2p-4, 0x1.51e83065121cfp-4},
+    {0x1.0c152382d7366p+0, -0x1.ee6913347c2a6p-54, 0x1.b8550d62bfb6ep-3, 0x1.ff1bde0fa3cadp-4,
+     0x1.8e5f3ab550989p-4, 0x1.656be8b38ebafp-4, 0x1.5c3c13008a099p-4, 0x1.662225a1b4f77p-4},
+  };
+
+  b64u64_u ix = {.f = x};
+  u64 ax = ix.u<<1;
+  double t,z,zl,jd,f0h,f0l;
+  if(ax>0x7fc0000000000000ull){ // |x|>0.5
+    static const double off[][2] = {
+      {0x1.921fb54442d18p+0, 0x1.1a62633145c07p-54}, {-0x1.921fb54442d18p+0, -0x1.1a62633145c07p-54}
+    };
+    i64 k = ix.u>>63;
+    f0h = off[k][0];
+    f0l = off[k][1];
+    if(__builtin_expect(ax>=0x7fe0000000000000ull, 0)){ // |x| >= 1
+      if(ax==0x7fe0000000000000ull) return f0h + f0l; // |x| = 1
+      if(ax>0xffe0000000000000ull) return x + x; // nan
+#ifdef CORE_MATH_SUPPORT_ERRNO
+      errno = EDOM;
+#endif
+      return 0./0.; // |x|>1
+    }
+    // for x>0.5 we use range reduction for double angle formula
+    // asin(x) = pi/2 - 2*asin(sqrt((1-x)/2)) and for x<-0.5 acos(x) = -pi/2 +
+    // 2*asin(sqrt((1-|x|)/2))
+    t = 2 - 2*__builtin_fabs(x);
+    jd = roundeven_finite(t*0x1p5);
+    z = __builtin_copysign(__builtin_sqrt(t), -x);
+    zl = __builtin_fma(z,z,-t)*((-0.5/t)*z);
+    t = 0.25*t - jd*0x1p-7;
+  } else { // |x|<=0.5
+    // for |x| < 0x1.7137449123ef6p-26 |asin(x) - x| is less than half of ulp of asin(x)
+    if(__builtin_expect(ax<0x7cae26e892247decull, 0)) return __builtin_fma(0x1p-55,x,x);
+    f0h = 0;
+    f0l = 0;
+    t = x*x;
+    jd = roundeven_finite(t*0x1p7);
+    t = __builtin_fma(x,x,-0x1p-7*jd);
+    z = x;
+    zl = 0;
+  }
+  // asin(xh+xl) = (xh + xl)*(cc[j][0] + (cc[j][1] + t*Poly(t, cc[j]+2)))
+  // where t = xh^2 - j/128 and j = round(128*xh^2)
+  int64_t j = jd;
+  const double *c = cc[j];
+  double t2 = t*t, d = t*((c[2] + t*c[3]) + t2*((c[4] + t*c[5]) + t2*(c[6] + t*c[7])));
+  double fh = c[0], fl = c[1] + d;
+  fh = muldd(z,zl, fh,fl, &fl);
+  fh = fastsum(f0h,f0l, fh,fl, &fl);
+  double eps = __builtin_fabs(z*t)*0x1.962p-52 + 0x1p-100;
+  double lb = fh + (fl - eps), ub = fh + (fl + eps);
+  if(__builtin_expect(lb!=ub, 0)) return as_asin_refine(x, lb);
+  return lb;
+}
+
+double as_asin_refine(double x, double phi){
+  // Consider x as sin(phi) then cos(phi) is ch + cl = sqrt(1-x^2)
+  // Using angle rotation formula bring the argument close to zero
+  // where the asin Taylor expansion works well.
+  double s2 = x*x, dx2 = __builtin_fma(x,x,-s2);
+  double c2l, c2h = fasttwosub(1.0,s2,&c2l);
+  c2l -= dx2;
+  c2h = fasttwosum(c2h,c2l,&c2l);
+
+  double c2f = __builtin_fma(x,-x,1);
+  double ch = __builtin_sqrt(c2f);
+  double cl = (c2l - __builtin_fma(ch,ch,-c2f))*((0.5/c2f)*ch);
+
+  int64_t jf = roundeven_finite(__builtin_fabs(phi) * 0x1.45f306dc9c883p+4);
+  // sin(pi/64*j) in the double-double format
+  static const double s[33][2] = {
+    {0x0p+0, 0x0p+0}, {-0x1.912bd0d569a9p-61, 0x1.91f65f10dd814p-5},
+    {-0x1.e2718d26ed688p-60, 0x1.917a6bc29b42cp-4}, {0x1.13000a89a11ep-58, 0x1.2c8106e8e613ap-3},
+    {-0x1.26d19b9ff8d82p-57, 0x1.8f8b83c69a60bp-3}, {-0x1.42deef11da2c4p-57, 0x1.f19f97b215f1bp-3},
+    {-0x1.5d28da2c4612dp-56, 0x1.294062ed59f06p-2}, {-0x1.efdc0d58cf62p-62, 0x1.58f9a75ab1fddp-2},
+    {-0x1.72cedd3d5a61p-57, 0x1.87de2a6aea963p-2}, {0x1.5b362cb974183p-57, 0x1.b5d1009e15ccp-2},
+    {0x1.e0d891d3c6841p-58, 0x1.e2b5d3806f63bp-2}, {-0x1.a5a014347406cp-55, 0x1.073879922ffeep-1},
+    {0x1.b25dd267f66p-55, 0x1.1c73b39ae68c8p-1}, {-0x1.efcc626f74a6fp-57, 0x1.30ff7fce17035p-1},
+    {0x1.8076a2cfdc6b3p-57, 0x1.44cf325091dd6p-1}, {-0x1.75720992bfbb2p-55, 0x1.57d69348cecap-1},
+    {-0x1.bdd3413b26456p-55, 0x1.6a09e667f3bcdp-1}, {-0x1.0f537acdf0ad7p-56, 0x1.7b5df226aafafp-1},
+    {-0x1.2c5e12ed1336dp-55, 0x1.8bc806b151741p-1}, {-0x1.30ee286712474p-55, 0x1.9b3e047f38741p-1},
+    {0x1.9f630e8b6dac8p-60, 0x1.a9b66290ea1a3p-1}, {-0x1.bc69f324e6d61p-55, 0x1.b728345196e3ep-1},
+    {-0x1.6e0b1757c8d07p-56, 0x1.c38b2f180bdb1p-1}, {-0x1.e7b6bb5ab58aep-58, 0x1.ced7af43cc773p-1},
+    {0x1.457e610231ac2p-56, 0x1.d906bcf328d46p-1}, {-0x1.014c76c126527p-55, 0x1.e212104f686e5p-1},
+    {0x1.760b1e2e3f81ep-55, 0x1.e9f4156c62ddap-1}, {0x1.52c7adc6b4989p-56, 0x1.f0a7efb9230d7p-1},
+    {0x1.562172a361fd3p-56, 0x1.f6297cff75cbp-1}, {-0x1.7a0a8ca13571fp-55, 0x1.fa7557f08a517p-1},
+    {-0x1.87df6378811c7p-55, 0x1.fd88da3d12526p-1}, {-0x1.c57bc2e24aa15p-57, 0x1.ff621e3796d7ep-1},
+    {0x0p+0, 0x1p+0}
+  };
+  // 0 <= jf <= 32
+  double Ch = s[32-jf][1], Cl = s[32-jf][0], Sh = s[jf][1], Sl = s[jf][0];
+
+  double ax = __builtin_fabs(x);
+  double dsh = ax - Sh, dsl = -Sl;
+  double dch = ch - Ch, dcl = cl - Cl;
+
+  double Sc = __builtin_fma(Sh, dch, 0x1.8p-4) - 0x1.8p-4;
+  double dSc = __builtin_fma(Sh, dch, -Sc);
+
+  double Cs = __builtin_fma(Ch, dsh, 0x1.8p-4) - 0x1.8p-4;
+  double dCs = __builtin_fma(Ch, dsh, -Cs);
+
+  double v = Cs - Sc;
+  double dv =  (Ch*dsl + Cl*dsh) - (Sh*dcl + Sl*dch) - (dSc - dCs);
+  v = fasttwosum(v,dv,&dv);
+  double sgn = __builtin_copysign(1.0, x), jt = jf*sgn;
+  // 0 <= jt <= 64
+  static const double c[][2] = {
+    {0x1p+0, -0x1.fc2c76456515bp-108}, {0x1.5555555555555p-3, 0x1.5555555623513p-57},
+    {0x1.3333333333333p-4, 0x1.9997e3427441bp-59}, {0x1.6db6db6db6db7p-5, -0x1.cb95ff08658e6p-62},
+    {0x1.f1c71c71c6d5bp-6, 0x1.b125bccdcc89ep-60}};
+  static const double ct[] = {0x1.6e8ba2ec8cb69p-6, 0x1.1c4ea7a15c997p-6, 0x1.ca8355d39bb67p-7};
+  double dv2, v2 = muldd(v,dv, v,dv, &dv2);
+  v *= sgn;
+  dv *= sgn;
+  double fl = v2*(ct[0] + v2*(ct[1] + v2*ct[2])), fh = polydd(v2,dv2, 5,c, &fl);
+  fh = muldd(v,dv, fh,fl, &fl);
+
+  double ph = jt * 0x1.921fb54442dp-5, pl = 0x1.8469898cc518p-53*jt, ps = -0x1.fc8f8cbb5bf6cp-102*jt;
+
+  // since 0 <= jt <= 64, ph and pl are exact
+  pl = fastsum(fh,fl, pl,ps, &ps);
+  ph = fasttwosum(ph,pl, &pl);
+  pl = fasttwosum(pl,ps, &ps);
+  ph = fasttwosum(ph,pl, &pl);
+  pl = fasttwosum(pl,ps, &ps);
+
+  b64u64_u th = {.f = ph}, tl = {.f = pl}, tn;
+  tn.u = (th.u&(0x7ffull<<52)) - (53ull<<52);
+  tl.u &= ~0ull>>1;
+  long dn = tl.u-tn.u, de = (tn.u - tl.u)>>52;
+  int hard = (-2<=dn && dn<=0) || (de>46);
+  double res = ph + pl;
+  if(hard) res = as_asin_database(x,res);
+  return res;
+}
+
+double as_asin_database(double x, double f){
+  static const uint64_t xdb[] = {
+    0x3e57137449123ef6, 0x3e5d12ed0af1a27e, 0x3e851c4b960778f5, 0x3e93cfc2a006a414,
+    0x3e9cbaa95dadb559, 0x3ebacd69f89ad8f1, 0x3ef2bffffffc233b, 0x3efff0f3022b2e9d,
+    0x3f13217783d70d1d, 0x3f1c373ff4aad79b, 0x3f6b3f28593cad2f, 0x3f8e17b3f6bb5e6e,
+    0x3f941d60a76a82ed, 0x3f9921c0a0486537, 0x3f9a3a2919d6b19b, 0x3f9d6315f7ee7e01,
+    0x3f9ea6fdc56fc61a, 0x3fa69768dc89bb00, 0x3faa4816b2066707, 0x3fad77b117f230d6,
+    0x3fafc7a07b2549aa, 0x3fb2df0542154f1b, 0x3fb51cf5db1b1956, 0x3fc9697cb602c582,
+    0x3fcd0ef799001ba9, 0x3fd4a8e1a96e38e3, 0x3fdda4e0e6c717a5, 0x3fdea8e8fdf47549,
+    0x3fe3b9994abb81d4,
+  };
+  static const double ydb[] = {
+    0x1.7137449123ef7p-26, 0x1.d12ed0af1a27fp-26, 0x1.51c4b9607790dp-23, 0x1.3cfc2a006a465p-22,
+    0x1.cbaa95dadb65p-22, 0x1.acd69f89ae57ap-20, 0x1.2c00000006dddp-16, 0x1.ff0f3024065e7p-16,
+    0x1.32177841ffbefp-14, 0x1.c373ff594d65bp-14, 0x1.b3f2ba40dbc66p-9, 0x1.e17faefac7797p-7,
+    0x1.41db571d96126p-6, 0x1.9226605233224p-6, 0x1.a3ae514c9befap-6, 0x1.d641e6d5e769ap-6,
+    0x1.ea829e3e988e5p-6, 0x1.69949b3d51fb1p-5, 0x1.a4b0bfb0454d5p-5, 0x1.d7bdcd778049fp-5,
+    0x1.fccdc252cad1fp-5, 0x1.2e36813a9874p-4, 0x1.5231b416ba885p-4, 0x1.994ffb5daf0f9p-3,
+    0x1.d5064e6fe82c5p-3, 0x1.50954b7bbf87bp-2, 0x1.ed25c5eb8c916p-2, 0x1.ff92a8ca216cdp-2,
+    0x1.540e24e5f33f3p-1,
+  };
+  const int signs = 0x1f73ffcb;
   b64u64_u t = {.f = x};
-  int e = (((i64)t.u>>52)&0x7ff)-0x3ff;
-  /* x = 2^e*y with 1 <= |y| < 2 */
-  i64 xsign = t.u&((u64)1<<63);
-  /* xsign=0 for x > 0, xsign=1 for x < 0 */
-  u64 sm = (t.u<<11)|(u64)1<<63;
-  /* sm contains in its high 53 bits: the implicit leading bit, and the
-     the 52 explicit bits from the significand, thus |x| = 2^(e+1)*sm/2^64
-     where 2^63 <= sm < 2^64 */
-  u128_u fi;
-  if(__builtin_expect (e>=0,0)){ /* |x| >= 1 */
-    u64 m = t.u<<12; /* m contains the 52 explicit bits from the significand */
-    if (e==0 && m == 0) /* case x = 1 or -1 */
-      /* h=0x1.921fb54442d18p+0 is pi/2 rounded to nearest,
-         and 0x1.1a62633145c07p-54 is pi/2-h rounded to nearest */
-      return __builtin_copysign (0x1.921fb54442d18p+0, x)
-        + __builtin_copysign (0x1.1a62633145c07p-54, x);
-    if (e==0x400 && m) return x + x; // nan
-#ifdef CORE_MATH_SUPPORT_ERRNO
-    errno = EDOM;
-#endif
-    feraiseexcept (FE_INVALID);
-    return __builtin_nan (">1");
-  } else if (__builtin_expect(e < -6,0)){ /* |x| < 2^-6 */
-    if (__builtin_expect (e < -26,0)) { /* |x| < 2^-26 */
-      /* For |x| < 2^-2, we have |asin(x)-x| < 0.25x^3
-         thus the difference between asin(x) and x is less than
-         0.25|x|^3, and since |x| < 2^53 ulp(x) and |x| < 2^-26:
-         |asin(x)-x| < 2^51 x^2 ulp(x) < 1/2 ulp(x), which
-         proves that asin(x) rounds either to x (always for
-         rounding to nearest), either to nextabove(x), or to nextbelow(x),
-         depending on the rounding mode and the sign of x.
-         The expression x + 2^-54*x rounds identically, where the constant
-         2^-54 can be replaced by any expression c <= 2^-54, such that
-         c*x < 1/2 ulp(x). */
-      /* We have underflow exactly when 0 < |x| < 2^-1022:
-         for RNDU, asin(2^-1022-2^-1074) would round to 2^-1022-2^-1075
-         with unbounded exponent range */
-#ifdef CORE_MATH_SUPPORT_ERRNO
-      if (x != 0 && __builtin_fabs (x) < 0x1p-1022)
-        errno = ERANGE; // underflow
-#endif
-      return __builtin_fma (x, 0x1p-54, x);
-    }
-    /* now 2^-26 <= |x| < 2^-6 */
-    /* We also have |x| = 2^e*sm/2^63, since e <= -7 we have e+1 <= -6,
-       thus we write |x| = 2^(e+1)*y with y=sm/2^64 */
-    u64 v2 = muuh(sm, sm), v3 = muuh(sm, v2);
-    /* v2 = floor(sm^2/2^64), v3 = floor(sm*v2/2^64) */
-    /* since -26 <= e <= -7, 0 <= -2*e-14 <= 38 thus the shift is valid */
-    v2 >>= -2*e-14;
-    /* v2/2^64 approximates 2^(-2e-14)*y^2: err(v2) <= 1 */
-    /* v3/2^64 approximates y^3: err(v3) <= 2 */
-    u64 d = muuh(v3, b[0] + muuh(v2, b[1] + muuh(v2, b[2] + muuh(v2, b[3] + muuh(v2, b[4])))));
-    /* err(muuh(v2, b[4])) <= 1
-       let c3=muuh(v2, b[4])
-       b[3] + c3 is exact, and does not overflow since c3 < b[4], and
-       b[3]+b[4] < 2^64
-       err(muuh(v2, b[3] + c3)) <= err(v2) + err(muuh(v2, b[4])) + 1
-                                <= 3
-       let c2=muuh(v2,b[3]+c3)
-       b[2] + c2 is exact, and does not overflow since c2 < b[3]+b[4],
-       and b[2]+b[3]+b[4] < 2^64
-       err(muuh(v2, b[2] + c2)) <= 1 + 3 + 1 <= 5
-       let c1=muuh(v2, b[2] + c2)
-       b[1] + c1 is exact, and does not overflow since c1 < b[2]+b[3]+b[4],
-       and b[1]+b[2]+b[3]+b[4] < 2^64
-       err(muuh(v2, b[1] + c1)) <= 1 + 5 + 1 <= 7
-       let c0=muuh(v2, b[1] + c1)
-       b[0] + c0 is exact, and does not overflow since c0 < b[1]+...+b[4],
-       and b[0]+...+b[4] < 2^64
-       err(muuh(v3, b[0] + c0)) <= err(v3) + 7 + 1 <= 10 */
-    /* d/2^64 approximates (up to some power of two) 1/6*x^3 + 3/40*x^5 + ...
-       + 63/2816*x^11 with maximal absolute error:
-       * 2^(84-82.731) < 3 between asin(x)-x and the b[] polynomial
-       * 10/2^64 for the total rounding error in d
-       Thus the total error is bounded by 3+10=13 (which means we can put
-       u.a += 12l<<ss below, since the error is below 13, and the left
-       bound is exact, thus adding 12.999 cannot yield any borrow).
-     */
-    int ss = 63 + 2*e;
-    fi.bl = d<<ss;
-    fi.bh = (d>>(64-ss)) + (sm>>1);
-    /* fi.a/2^127 approximates y + 1/6*y^3 + 3/40*y^5 + ... + 63/2816*y^11 */
-    int nz = __builtin_clzll (fi.bh) + (rm==FE_TONEAREST);
-    /* the number of leading zeros in fi.bh is usually 1, but it can also
-       be 0, for example for x=0x1.fffffffffffffp-7, thus nz is 0, 1 or 2 */
-    u128_u u = fi;
-    u.a += 12ll<<ss;
-    /* Here fi is the 'left' approximation, and u is the 'right' approximation,
-       with error bounded by 9 ulp(d). We check the last bit (or the round bit
-       for FE_TONEAREST) does not change between fi and u. */
-    if( __builtin_expect(((fi.bh^u.bh)>>(11-nz))&1, 0)){
-      return asin_acc (x);
-    }
-    e += 0x3ff;
-  } else { /* case |x| >= 2^-6 */
-    double xx = __builtin_fma(x,-x,1.0); /* xx = 1-x^2 */
-    b64u64_u ixx = {.f = 1.0/xx}, c = {.f = __builtin_sqrt (xx)};
-    /* we have xx = (1-x^2)*(1+theta1) with |theta1| < 2^-52
-       thus c = sqrt(1-x^2)*sqrt(1+theta1)*(1+theta2) with |theta2| < 2^-52
-       which can be written:
-       c = sqrt(1-x^2)*(1+theta3)^(3/2) with |theta3| < 2^-52 or:
-       c = sqrt(1-x^2)*(1+theta4) with |theta4| < 2^-51.41
-       thus the absolute error on c is bounded by:
-       |c - sqrt(1-x^2)| < sqrt(1-x^2)*2^51.41 < 2^-51.41.
-       Thus the absolute error on c is bounded by 2^-51.41. */
-    /* ixx ~ 1/(1-x^2), c ~ sqrt(1-x^2) */
-    ixx.f *= c.f;
-    /* ixx approximates 1/sqrt(1-x^2). Let t = o(1/xx) the previous
-       value of ixx. We have t = 1/xx*(1+theta1) with |theta1| < 2^-52,
-       c = sqrt(xx)*(1+theta2) with |theta2| < 2^-52, then
-       ixx = o(t*c) = t*c*(1+theta3) with |theta3| < 2^-52, which yields:
-       ixx = 1/sqrt(xx)*(1+theta1)*(1+theta2)*(1+theta3)
-           = 1/c*(1+theta1)*(1+theta2)^2*(1+theta3)
-       thus |ixx-1/c| < 1/c*|(1+theta1)*(1+theta2)^2*(1+theta3)-1|.
-       The maximal values are attained when all thetaj are +/-2^-52,
-       which yields |ixx-1/c| < 2^-49.9*1/c.
-    */
-    double ax = __builtin_fabs (x), x2 = x*x;
-    double c0 = ch[0] + ax*ch[1];
-    double c2 = ch[2] + ax*ch[3];
-    c0 += x2*c2;
-    /* FIXME: use FMA here: c0 = fma (c0, c.f, 64) */
-    c0 *= c.f;
-    c0 += 64;
-    /* now c0 approximates 64+64*acos(x)/(pi/2), which lies in [64,128] */
-    b64u64_u ic = {.f = c0};
-    int indx = ((ic.u&(~0ull>>12)) + ((i64)1<<(52-7))) >> (52-6);
-    /* indx = round(c0)-64. We have indx < 64 since c0 is decreasing with
-       |x|, thus the largest value is obtained for |x| = 2^-6, and for this
-       value we get c0 = 0x1.fd637111d9943p+6 = 127.347111014276
-       with rounding upwards.
-       Let y=asin(x), i=64-indx, and y[i]=i*pi/2/64, then we have the rotation
-       formula:
-       sin(y-y[i]) = sin(y)*cos(y[i]) - cos(y)*sin(y[i])
-                   = x*cos(y[i]) - sqrt(1-x^2)*sin(y[i])
-       thus:
-       y = y[i] + asin(x*cos(y[i]) - sqrt(1-x^2)*sin(y[i]))
-       where x*cos(y[i]) - sqrt(1-x^2)*sin(y[i]) is small. */
-    u64 cm = (c.u<<11)|(u64)1<<63; int ce = ((i64)c.u>>52) - 0x3ff;
-    /* cm contains in its high bits the 53 significant bits from c,
-       which approximates sqrt(1-x^2), including the implicit bit,
-       ce is the corresponding exponent, such that c = 2^ce*cm/2^63.
-       We now refine the approximation c of sqrt(1-x^2) using one step
-       of Newton's iteration: c += 1/2*e/sqrt(1-x^2) where e = (1-x^2) - c^2.
-       It can be proven (by using the same kind of analysis than in Modern
-       Computer Arithmetic, Lemma 3.7) that if c is an approximation of
-       sqrt(a), and c' = c + 1/2*(a-c^2)/c, then
-       |c'-sqrt(a)| = (sqrt(a)-c)^2/(2c).
-       Here a=1-x^2, and since |c - sqrt(1-x^2)| < 2^-51.41, we get:
-       |c'-sqrt(a)| < 2^-103.82/c. */
-    u128_u sm2 = {.a = (u128)sm * sm}, cm2 = {.a = (u128)cm * cm};
-    /* x^2 = 2^(2*e)*sm2/2^126 and c^2 = 2^(2*ce)*cm2/2^126 */
-    const int off = 36 - 22 + 14;   /* off = 28 */
-    int ss = 128 - 104 + 2*e + off; /* ss = 52 + 2*e */
-    /* for e=-6, ss=40; for x=0x1.fffffffffffffp-1, ss=50 */
-    shl(&sm2, ss);
-    /* now frac(2^50*x^2) = sm2/2^128 */
-    int sc = 128 - 104 + 2*ce + off;
-    if(__builtin_expect(sc>=0, 1))
-      shl(&cm2, sc);
-    else
-      cm2.a >>= -sc; // since sc < 0, the shift by -sc is legitimate
-    /* now frac(2^50*c^2) = cm2/2^128 */
-    sm2.a += cm2.a; /* now frac(2^50*(x^2+c^2)) = sm2/2^128 */
-    /* since |c-sqrt(xx)| < 2^-51.41, we have:
-       |c^2-xx| < 2^-51.41*|c+sqrt(xx)| < 2^-50.41 since c,xx < 1.
-       This proves that |2^50*e| < 2^-0.41 with e = (1-x^2) - c^2.
-       Thus frac(2^50*(x^2+c^2)) is enough to uniquely identify the
-       value of 2^50*(x^2+c^2). */
-    i64 h = sm2.bh;
-    /* h/2^64 approximates 2^50*(x^2+c^2) mod 1, with error bounded by
-       1/2^64 for the truncated part sm2.bl/2^128. */
-    u64 ixm = (ixx.u&(~0ull>>12))|(i64)1<<52; int ixe = ((i64)ixx.u>>52) - 0x3ff;
-    /* ixx = ixm*2^(ixe-52) */
-    /* x*cos(y[i]) - sqrt(1-x^2)*sin(y[i]) is computed as
-       (x-sin(y[i]))*cos(y[i]) - (sqrt(1-x^2)-cos(y[i]))*sin(y[i]) */
-    i64 Smh;
-    ss = 6 + e; /* ss >= 0 */
-    Smh = (sm<<ss) - sh[64-indx];
-    /* since |x| = 2^(e+1)*sm/2^64, sm*2^ss = |x|*2^69 */
-    /* now Smh approximates 2^69*(|x|-sin(y[i])) mod 2^64,
-       with maximal error < 0.5 */
-    i64 Cmh;
-    sc = 6 + ce;
-    /* Here ce might be less than -6, and thus sc negative, for example when
-       |x| is very near 1, since sqrt(1-x^2) ~ c^2 = 2^(2*ce)*cm2/2^126.
-       The worst case for |x|=0x1.fffffffffffffp-1 is ce=-26. */
-    if(__builtin_expect(sc>=0,1))
-      Cmh = cm<<sc;
-    else
-      Cmh = cm>>-sc; // since sc < 0, the shift by -sc is legitimate
-    Cmh -= sh[indx];
-    /* We now need to add
-       1/2*(1-x^2-c^2)/c to c. Instead we subtract 1/2*h/2^114*ixm*2^(ixe-52),
-       with error bounded by:
-       (a) 2^-103.82/c for the error in Newton's method
-       (b) 1/2/2^114/c for the error on h (neglecting lower order terms)
-       (c) 1/2/2^50*2^-49.9*1/c for the error between ixx and 1/c
-       Altogether we have an error bounded by 2^-100.72*1/c.
-       Since c >= 2^-26 this yields 2^-74.72.
-    */
-    Cmh -= mh(h, ixm)>>(34-ixe);
-    /* now Cmh approximates 2^69*(sqrt(1-x^2)-cos(y[i]))
-       with maximal error 2^69*2^-74.72+0.5 < 0.52 */
-    i64 v = mh(Smh, s[indx]) - mh(Cmh, s[64-indx]), v2 = mh(v, v), v3 = mh(v2, v);
-    /* v approximates 2^68*[(|x|-sin(y[i]))*cos(y[i])
-                            -(sqrt(1-x^2)-cos(y[i]))*sin(y[i])] with error
-       bounded by:
-       1 (truncation error in mh(Smh, s[indx]))
-       +1 (truncation error in mh(Cmh, s[64-indx]))
-       +0.5*0.5=0.25 (error on Smh multiplied by s[indx]/2^64)
-       +0.52*0.5=0.26 (error on Cmh multiplied by s[64-indx])
-       which yields 2.51 neglecting second order terms. */
-    /* the error on v2 is thus bounded by 5.02, and that on v3 by 7.53, still
-       neglecting second order terms */
-    v += mh(v3, a[0] + muuh(v2, a[1] + muuh(v2, a[2] + muuh(v2, a[3]))));
-    /* err(muuh(v2, a[3]) <= 1
-       let c2=muuh(v2, a[3])
-       a[2] + c2 is exact, and does not overflow since c2 < a[3], and
-       a[2]+a[3] < 2^64
-       err(muuh(v2, a[2] + c2)) <= err(v2) + err(muuh(v2, a[3])) + 1
-                                <= 5.02 + 1 + 1 = 7.02
-       let c1=muuh(v2, a[2] + c2)
-       a[1] + c1 is exact, and does not overflow since c1 < a[2]+a[3],
-       and a[2]+a[3] < 2^64
-       err(muuh(v2, a[1] + c1)) <= err(v2) + err(muuh(v2, a[2] + c2)) + 1
-                                <= 5.02 + 7.02 + 1 = 13.04
-       let c0=muuh(v2, a[1] + c1)
-       a[0] + c0 is exact, and does not overflow since c0 < a[1]+a[2]+a[3],
-       and a[1]+a[2]+a[3] < 2^64
-       err(mh(v3, a[0] + c0) <= err(v3) + err(c0) + 1 <= 7.53+13.04+1 = 21.57
-       The total error on v is thus bounded by 2.51 (order 1) + 21.57 (orders
-       3 and more), thus by 24.08.
-     */
-
-    fi.bl = 0xd313198a2e037073;
-    fi.bh = 0x3243f6a8885a308;
-    /* fi.a/2^127 approximates pi/2/64 */
-    fi.a *= (u64)(64u - indx); /* multiply pi/2/64 by i=64-indx */
-    /* we add v after normalization */
-    u64 Vh = v>>5, Vl = (u64)v<<59;
-    /* the maximal error 24.08 on v translates into an error of 24.08*2^59
-       on Vl */
-    i128 V = (u128)Vh<<64|Vl;
-    fi.a += V;
-    /* now fi/2^127 approximates asin(|x|) */
-
-    int nz = __builtin_clzll(fi.bh) + (rm==FE_TONEAREST);    
-    u128_u u = fi, d = fi;
-    /* The error is bounded by 24.08*2^59 here, thus by 386*2^55.
-       For reference, the original (non proven) error bounds are:
-       u.a += 50l<<55 and d.a -= 27l<<55. */
-    u.a += (u64)386<<55;
-    d.a -= (u64)386<<55;
-    if( __builtin_expect(((d.bh^u.bh)>>(11-nz))&1, 0)){
-      return asin_acc(x);
-    }
-    e = 0x3fel;
+  uint64_t ax = t.u & (~0ul>>1);
+  int a = 0, b = sizeof(xdb)/sizeof(xdb[0]) - 1, m = (a + b)/2;
+  while (a <= b) { // binary search
+    if (xdb[m] < ax)
+      a = m + 1;
+    else if (xdb[m] == ax) {
+      t.f = ydb[m];
+      t.u -= 54ull<<52;
+      t.u |= ((signs>>m)&1ull)<<63;
+      f = __builtin_copysign(ydb[m],x) + __builtin_copysign(1,x)*t.f;
+      break;
+    } else
+      b = m - 1;
+    m = (a + b)/2;
   }
-
-  int nz = __builtin_clzll(fi.bh);
-  u64 rnd;
-  if(__builtin_expect(rm==FE_TONEAREST, 1)){
-    rnd = (fi.bh>>(10-nz))&1;
-  } else if(rm==FE_DOWNWARD){
-    rnd =  (u64)xsign>>63;
-  } else if(rm==FE_UPWARD){
-    rnd =  ((u64)xsign>>63)^1;
-  } else {
-    rnd = 0;
-  }
-  volatile double k0 = 1.0, __attribute__((unused)) k = k0 + 0x1p-1022;
-  t.u = ((fi.bh>>(11-nz))+((u64)(e-nz)<<52|rnd))|xsign;
-  return t.f;
+  return f;
 }

@@ -25,7 +25,9 @@ SOFTWARE.
 */
 
 #include <stdint.h>
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
+#endif
 #include <fenv.h> // for feraiseexcept, FE_UNDERFLOW
 #if defined(__x86_64__)
 #include <x86intrin.h>

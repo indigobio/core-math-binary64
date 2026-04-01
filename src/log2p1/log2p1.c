@@ -34,7 +34,9 @@ SOFTWARE.
 
 #include <stdint.h>
 #include <math.h> // for log2
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
+#endif
 #include "dint_log2p1.h"
 
 /*

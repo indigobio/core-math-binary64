@@ -25,7 +25,9 @@ SOFTWARE.
 */
 
 #include <stdint.h>
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
+#endif
 #if defined(__x86_64__)
 #include <x86intrin.h>
 #endif
@@ -55,7 +57,9 @@ static inline double muldd(double xh, double xl, double ch, double cl, double *l
 
 static inline double polydd(double xh, double xl, int n, const double c[][2], double *l){
   int i = n-1;
-  double ch = c[i][0] + *l, cl = ((c[i][0] - ch) + *l) + c[i][1], e;
+  double ch, cl, e;
+  ch = fasttwosum (c[i][0], *l, &cl);
+  cl += c[i][1];
   while(--i>=0){
     ch = muldd(xh, xl, ch, cl, &cl);
     ch = fasttwosum(c[i][0], ch, &e);
@@ -85,11 +89,16 @@ static double __attribute__((cold,noinline)) as_exp_accurate(double x, double t,
 
 static double __attribute__((noinline)) as_cosh_zero(double x){
   static const double ch[][2] = {
-    {0x1p-1, -0x1.c7e8db669f624p-111}, {0x1.5555555555555p-5, 0x1.5555555556135p-59},
-    {0x1.6c16c16c16c17p-10, -0x1.f49f4a6e838f2p-65}, {0x1.a01a01a01a01ap-16, 0x1.a4ffbe15316aap-76}};
-  static const double cl[] = {0x1.27e4fb7789f5cp-22, 0x1.1eed8eff9089cp-29, 0x1.939749ce13dadp-37, 0x1.ae9891efb6691p-45};
+    {0x1p-1, -0x1.c7e8db669f624p-111},               // degree 2
+    {0x1.5555555555555p-5, 0x1.5555555556135p-59},   // degree 4
+    {0x1.6c16c16c16c17p-10, -0x1.f49f4a6e838f2p-65}, // degree 6
+    {0x1.a01a01a01a01ap-16, 0x1.a4ffbe15316aap-76}}; // degree 8
+  static const double cl[] = {0x1.27e4fb7789f5cp-22, // degree 10
+                              0x1.1eed8eff9089cp-29, // degree 12
+                              0x1.939749ce13dadp-37, // degree 14
+                              0x1.ae9891efb6691p-45}; // degree 16
   double x2 = x*x , x2l = __builtin_fma(x, x,-x2);
-  double y2 = x2 * (cl[0] + x2 * (cl[1] + x2 * (cl[2] + x2 * (cl[3]))));
+  double y2 = x2 * (cl[0] + x2 * (cl[1] + x2 * (cl[2] + x2 * cl[3])));
   double y1 = polydd(x2, x2l, 4, ch, &y2);
   y1 = muldd(y1, y2, x2, x2l, &y2);
   double y0 = fasttwosum(1.0, y1, &y1);
@@ -152,7 +161,7 @@ double cr_cosh(double x){
     cosh(x)~1+x^2*P(x^2) for |x|<0.125. For other arguments the
     identity cosh(x)=(exp(|x|)+exp(-|x|))/2 is used. For |x|<5 both
     exponents are calculated with slightly higher precision than
-    double. For 5<|x|<36.736801 the exp(-|x|) is rather small and is
+    double. For 5<|x|<36.736801, exp(-|x|) is rather small and is
     calculated with double precision but exp(|x|) is calculated with
     higher than double precision. For 36.736801<|x|<710.47586
     exp(-|x|) becomes too small and only exp(|x|) is calculated.
@@ -245,11 +254,20 @@ double cr_cosh(double x){
   if(__builtin_expect(aix<0x3fc0000000000000ull, 0)){ // |x| < 0.125
     if(__builtin_expect(aix<0x3e50000000000000ull, 0)) // |x| < 0x1p-26
       return __builtin_fma(ax,0x1p-55,1);
+    /* q(x) = 1 + c0*x^2 + c1*x^4 + c2*x^6 + c3*x^8 + c4*x^10 is a degree-10
+       polynomial approximating cosh(x) on [2^-26, 0.125] such that:
+       |q(x) - cosh(x)| < 2^-67.518 * x^2.
+       This polynomial was generated with the following Sollya command:
+       d = [2^-26,0.125];
+       q=1+x^2*fpminimax((cosh(x)-1)/x^2, [|0,2,4,6,8|], [|53...|], d, absolute);
+    */
     static const double c[] = {
-      0x1p-1, 0x1.555555555554ep-5, 0x1.6c16c16c26737p-10, 0x1.a019ffbbcdbdap-16, 0x1.27ffe2df106cbp-22};
-    double x2 = x*x, x4 = x2*x2, p = x2*((c[0] + x2*c[1]) + x4*((c[2] + x2*c[3]) + x4*c[4]));
-    // failure with e = x2*(2.82*0x1p-53) and x=0x1.02f8f4ed3ecbp-12 (RNDU)
-    double e = x2*(4*0x1p-53), lb = 1 + (p - e), ub = 1 + (p + e);
+      0x1p-1, 0x1.5555555555554p-5, 0x1.6c16c16c1d0cp-10,
+      0x1.a01a0075066b4p-16, 0x1.27faff8dcc1c8p-22};
+    double x2 = x*x, x4 = x2*x2, p = x2*((c[0] + x2*c[1])
+                                         + x4*((c[2] + x2*c[3]) + x4*c[4]));
+    // fails with e = x2*(0x1.c8p-52), x=0x1.0f0a7d6ea89ep-14 (rndu, no FMA)
+    double e = x2*0x1.84p-51, lb = 1 + (p - e), ub = 1 + (p + e);
     if(lb == ub) return lb;
     return as_cosh_zero(x);
   }
@@ -266,6 +284,12 @@ double cr_cosh(double x){
   }
 
   // now 0.125 <= |x| <= 0x1.633ce8fb9f87dp+9
+  /* exhaustive tests:
+     Vincenzo on [0.125, 0.25) (done with FMA, done up to 0x1.7d8p-3 without FMA)
+     0.25 <= x < 256: done
+     256 <= x < 512: explor
+     512 <= x < 710.475860073944: done
+  */
   int64_t il = ((uint64_t)jt.u<<14)>>40, jl = -il;
   int64_t i1 = il&0x3f, i0 = (il>>6)&0x3f, ie = il>>12;
   int64_t j1 = jl&0x3f, j0 = (jl>>6)&0x3f, je = jl>>12;
@@ -284,7 +308,7 @@ double cr_cosh(double x){
       sp.u = (1021 + ie)<<52;
       rh = th;
       rl = tl + th*pp;
-      double e = 0.11e-18*th, lb = rh + (rl - e), ub = rh + (rl + e);
+      double e = 0.12e-18*th, lb = rh + (rl - e), ub = rh + (rl + e);
       if(lb == ub) return (lb*sp.f)*2;
 
       th = as_exp_accurate(ax, t, th, tl, &tl);
@@ -309,8 +333,8 @@ double cr_cosh(double x){
     rh = th;
     rl = (tl + em) + th*pp;
 
-    double e = 0.117e-18*rh, lb = rh + (rl - e), ub = rh + (rl + e);
-    // fails with e = 0.091e-18*rh and x=0x1.4173941572a71p+2 (rndz)
+    double e = 0x1.202p-63*rh, lb = rh + (rl - e), ub = rh + (rl + e);
+    // fails with e = 0x1.afbp-64*rh and x=0x1.4173941572a71p+2 (rndz)
     if(lb == ub) return lb;
 
     th = as_exp_accurate( ax, t, th, tl, &tl);
@@ -340,8 +364,8 @@ double cr_cosh(double x){
 
     rh = fph + fmh;
     rl = ((fph - rh) + fmh) + fml + fpl;
-    double e = 0.33e-18*rh, lb = rh + (rl - e), ub = rh + (rl + e);
-    // fails with e = 0.076e-18*rh and x=0x1.c334ce55f09f7p+1 (rndu)
+    double e = 0x1.c0ap-62*rh, lb = rh + (rl - e), ub = rh + (rl + e);
+    // fails with e = 0x1.855p-64*rh and x=0x1.dbf464fbc8795p+0 (rndz, no fma)
     if(lb == ub) return lb;
     th = as_exp_accurate( ax, t, th, tl, &tl);
     qh = as_exp_accurate(-ax,-t, qh, ql, &ql);

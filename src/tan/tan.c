@@ -27,7 +27,9 @@ SOFTWARE.
 #include <stdint.h>
 #include <inttypes.h>
 #include <fenv.h> // for fegetround, FE_TONEAREST, FE_DOWNWARD, FE_UPWARD
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
+#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
@@ -2248,15 +2250,13 @@ cr_tan (double x)
 
   if (__builtin_expect (e == 0x7ff, 0)) /* NaN, +Inf and -Inf. */
   {
+    if ((t.u << 1) == 0x7ffull<<53) { // +/-Inf
 #ifdef CORE_MATH_SUPPORT_ERRNO
-    if ((t.u << 1) == 0x7ffull<<53) // Inf
       errno = EDOM;
 #endif
-    if ((t.u << 1) != 0x7ff8ull<<49){
-      return 0.0 / 0.0;
+      return x - x; // raises invalid
     }
-    t.u = ~0ull;
-    return t.f;
+    return x + x; // NaN
   }
   
   /* now x is a regular number */

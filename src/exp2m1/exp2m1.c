@@ -25,7 +25,9 @@ SOFTWARE.
 */
 
 #include <stdint.h>
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
+#endif
 #include <math.h> // needed to define exp2m1() since glibc does not have it yet
 
 // Warning: clang also defines __GNUC__

@@ -25,7 +25,9 @@ SOFTWARE.
 */
 
 #include <stdint.h>
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
+#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
@@ -105,8 +107,8 @@ static inline double sum(double xh, double xl, double ch, double cl, double *l){
 }
 
 static inline double muldd(double xh, double xl, double ch, double cl, double *l){
-  double ahhh = ch*xh;
-  *l = (cl*xh + ch*xl) + __builtin_fma(ch, xh, -ahhh);
+  double ahhh = xh*ch;
+  *l = (xh*cl + xl*ch) + __builtin_fma(xh, ch, -ahhh);
   return ahhh;
 }
 
@@ -127,7 +129,7 @@ double cr_acos (double x){
   // coefficients of a polynomial approximation of asin(x):
   // asin(x) = x*(cc[j][0] + cc[j][1] + t*P(t, cc[j] + 2))
   // where t = x^2 - j/128
-  static const double cc[][8] = {
+  static const double cc[33][8] = {
     {                   1,                      0, 0x1.5555555555555p-3, 0x1.33333333333e4p-4,
      0x1.6db6db6d31f82p-5, 0x1.f1c71f6889397p-6, 0x1.6e874b7045b46p-6, 0x1.1f753132271e2p-6},
     {0x1.0055a27e0d033p+0, -0x1.d9ba10494c062p-54, 0x1.57c00cb5d6c4dp-3, 0x1.37881f5649a75p-4,
@@ -215,6 +217,7 @@ double cr_acos (double x){
     // for x>0.5 we use range reduction for double angle formula
     // acos(x) = 2*asin((1-x)/2) and for x<-0.5 acos(x) = pi -
     // 2*asin((1-x)/2)
+    // exhaustive search in progress: nancy (gr10)
     t = 2 - 2*__builtin_fabs(x);
     jd = roundeven_finite(t*0x1p5);
     z = __builtin_copysign(__builtin_sqrt(t), x);
@@ -223,6 +226,7 @@ double cr_acos (double x){
   } else { // |x|<=0.5
     f0h = 0x1.921fb54442d18p+0;
     f0l = 0x1.1a62633145c07p-54;
+    // |f0h+f0l - pi/2| < 2^-109
     // for |x| <= 0x1.cb3b399d747f2p-55, acos(x) rounds to pi/2 to nearest
     // this avoids a spurious underflow exception with the code below
     if(__builtin_expect(ax <= 0x7919676733ae8fe4, 0)) return f0h + f0l;
@@ -244,7 +248,8 @@ double cr_acos (double x){
   double fh = c[0], fl = c[1] + d;
   fh = muldd(z,zl, fh,fl, &fl);
   fh = fastsum(f0h,f0l, fh,fl, &fl);
-  double eps = __builtin_fabs(z*t)*0x1.8bp-52 + 0x1p-105; // all arguments in [-0x1.1a93e5d11dac2p-1, -0x1.1a86cd0e3b2c2p-1] were checked
+  // fails with 0x1.8bp-52 for x=-0x1.3e827a2cd6d51p-1 (no FMA)
+  double eps = __builtin_fabs(z*t)*0x1.8cp-52 + 0x1p-105; // all arguments in [-0x1.1a93e5d11dac2p-1, -0x1.1a86cd0e3b2c2p-1] were checked
   double lb = fh + (fl - eps), ub = fh + (fl + eps);
   if(__builtin_expect(lb!=ub, 0)) return as_acos_refine(x, lb);
   return lb;

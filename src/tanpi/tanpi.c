@@ -26,7 +26,9 @@ SOFTWARE.
 */
 
 #include <stdint.h>
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
+#endif
 #include <math.h> // needed to provide tanpi() since glibc does not have it
 
 // Warning: clang also defines __GNUC__

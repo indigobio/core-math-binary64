@@ -31,7 +31,9 @@ SOFTWARE.
 #include <fenv.h> // for fenv_t, feholdexcept, fetestexcept, ...
 #include <stdio.h> // needed in case of correct rounding failure
 #include <stdint.h>
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
+#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)

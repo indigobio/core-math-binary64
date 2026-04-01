@@ -1,6 +1,6 @@
 /* Correctly rounded hyperbolic sine for binary64 values.
 
-Copyright (c) 2023-2025 Alexei Sibidanov <sibid@uvic.ca>.
+Copyright (c) 2023-2026 Alexei Sibidanov and Paul Zimmermann.
 
 This file is part of the CORE-MATH project
 (https://core-math.gitlabpages.inria.fr/).
@@ -24,8 +24,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+/* The correctness of this code is proven in this document:
+   The CORE-MATH sinh is correctly rounded,
+   Guillaume Melquiond and Paul Zimmermann,
+   https://core-math.gitlabpages.inria.fr/sinh.pdf, March 2026 */
+
 #include <stdint.h>
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
+#endif
 #if defined(__x86_64__)
 #include <x86intrin.h>
 #endif
@@ -47,20 +54,22 @@ static inline double fasttwosum(double x, double y, double *e){
 }
 
 static inline double muldd(double xh, double xl, double ch, double cl, double *l){
-  double h = ch*xh;
-  *l = __builtin_fma(ch,xh, -h) + xh*cl + ch*xl;
+  double h = xh*ch;
+  *l = __builtin_fma(xh,ch, -h) + xh*cl + xl*ch;
   return h;
 }
 
 static inline double mulddd(double xh, double xl, double ch, double *l){
-  double h = ch*xh;
-  *l = __builtin_fma(ch,xh, -h) + ch*xl;
+  double h = xh*ch;
+  *l = __builtin_fma(xh,ch, -h) + xl*ch;
   return h;
 }
 
 static inline double polydd(double xh, double xl, int n, const double c[][2], double *l){
   int i = n-1;
-  double ch = c[i][0] + *l, cl = ((c[i][0] - ch) + *l) + c[i][1], e;
+  double ch, cl, e;
+  ch = fasttwosum (c[i][0], *l, &cl);
+  cl += c[i][1];
   while(--i>=0){
     ch = muldd(xh, xl, ch, cl, &cl);
     ch = fasttwosum(c[i][0], ch, &e);
@@ -289,16 +298,16 @@ double cr_sinh(double x){
 #endif
       return __builtin_fma(x,0x1p-55,x);
     }
-    /* x + p where p = c[0]*x^3 + c[1]*x^5 + c[2]*x^7 + c[3]*x^9 + c[4]*x^11
-       is a minimax approximation of sinh(x) on [x0,1/4] with relative error
-       less than 2^-60.509 */
+    /* With p = c[0]*x^3 + c[1]*x^5 + c[2]*x^7 + c[3]*x^9 + c[4]*x^11,
+       q = x + p is a minimax approximation of sinh(x) on [x0,1/4] such that
+       |q - sinh(x)|/x^3 < 2^-56.584 */
     static const double c[] =
-      {0x1.5555555555555p-3, 0x1.1111111111087p-7, 0x1.a01a01a12e1c3p-13,
-       0x1.71de2e415aa36p-19, 0x1.aed2bff4269e6p-26};
+      {0x1.5555555555555p-3, 0x1.111111111151ep-7, 0x1.a01a019d0c767p-13,
+       0x1.71de444a96e11p-19, 0x1.ae8465375242p-26};
     double x2 = x*x, x3 = x2*x, x4 = x2*x2,
       p = x3*((c[0] + x2*c[1]) + x4*((c[2] + x2*c[3]) + x4*c[4]));
     // fails with e = x3*0x1.5p-53 and x=0x1.71c5b3515d069p-8 (rndz, no fma)
-    double e = x3*0x1.ep-53, lb = x + (p - e), ub = x + (p + e);
+    double e = x3*0x1.cp-53, lb = x + (p - e), ub = x + (p + e);
     if(lb == ub) return lb;
     return as_sinh_zero(x);
   }
@@ -310,9 +319,7 @@ double cr_sinh(double x){
     return __builtin_copysign(0x1p1023, x)*2.0;
   }
   // now 0.25 <= |x| < 710.47586
-  /* checked exhaustively with/without FMA:
-   * 0.25 <= x < 4
-   */
+  // this branch was checked exhaustively with/without FMA
   int64_t il = ((u64)jt.u<<14)>>40, jl = -il;
   int64_t i1 = il&0x3f, i0 = (il>>6)&0x3f, ie = il>>12;
   int64_t j1 = jl&0x3f, j0 = (jl>>6)&0x3f, je = jl>>12;
@@ -333,7 +340,7 @@ double cr_sinh(double x){
       rl = tl + th*pp;
       rh *= __builtin_copysign(1, x);
       rl *= __builtin_copysign(1, x);
-      double e = 0.11e-18*th, lb = rh + (rl - e), ub = rh + (rl + e);
+      double e = 0x1.1b6p-63*th, lb = rh + (rl - e), ub = rh + (rl + e);
       if(lb == ub) return (lb*sp.f)*2;
 
       th = as_exp_accurate(ax, t, th, tl, &tl);
@@ -360,8 +367,8 @@ double cr_sinh(double x){
 
     rh *= __builtin_copysign(1, x);
     rl *= __builtin_copysign(1, x);
-    // fails with e = 0.1162e-18*rh and x=0x1.4059050000564p+2 (rndz, no fma)
-    double e = 0.117e-18*rh, lb = rh + (rl - e), ub = rh + (rl + e);
+    // fails with e = 0x1.1dbp-63*rh and x=0x1.4971fd7b64137p+2 (rndz, no fma)
+    double e = 0x1.202p-63*rh, lb = rh + (rl - e), ub = rh + (rl + e);
     if(lb == ub) return lb;
 
     th = as_exp_accurate( ax, t, th, tl, &tl);
@@ -392,7 +399,7 @@ double cr_sinh(double x){
     rl = ((fph - rh) - fmh) - fml + fpl;
     rh *= __builtin_copysign(1, x);
     rl *= __builtin_copysign(1, x);
-    double e = 0.33e-18*rh, lb = rh + (rl - e), ub = rh + (rl + e);
+    double e = 0x1.c0ap-62*rh, lb = rh + (rl - e), ub = rh + (rl + e);
     if(lb == ub) return lb;
     th = as_exp_accurate( ax, t, th, tl, &tl);
     qh = as_exp_accurate(-ax,-t, qh, ql, &ql);

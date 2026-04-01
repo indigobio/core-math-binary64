@@ -25,7 +25,9 @@ SOFTWARE.
 */
 
 #include <stdint.h>
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
+#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
@@ -181,6 +183,8 @@ double cr_asinh(double x){
     // for |x| < 0x1.7137449123ef7p-26, asinh(x) rounds to x to nearest
     // for |x| < 0x1p-1022 we have underflow but not for 0x1p-1022 (to nearest)
     if(__builtin_expect(u<0x3e57137449123ef7ull, 0)){ // |x| < 0x1.7137449123ef7p-26
+      /* we need to check x=0 separately because fma(-2^-60,-0,-0) yields +0
+         for rounding to nearest */
       if(__builtin_expect(!u, 0)) return x;
       double res = __builtin_fma(-0x1p-60,x,x);
 #ifdef CORE_MATH_SUPPORT_ERRNO

@@ -32,7 +32,9 @@ SOFTWARE. */
 */
 
 #include <stdint.h>
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
+#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
@@ -223,10 +225,14 @@ double cr_acosh(double x){
     double z = 1/(x*x);
     g = cl[0] + z*(cl[1] + z*(cl[2] + z*cl[3]));
   } else if(ix.u<0x40e0100000000000ull){ // 0x1.71p+9 <= x < 0x1.01p+15
+    /* this branch was tested exhaustively (revision d764c73) with/without FMA */
     static const double cl[] = {-0x1.7f77c8429c6c6p-67, -0x1.ffffffffff214p-3, -0x1.8000268641bfep-4};
     double z = 1/(x*x);
     g = cl[0] + z*(cl[1] + z*cl[2]);
   } else if(ix.u<0x41ea000000000000ull){ // 0x1.01p+15 <= x < 0x1.ap+31
+    /* tested exhaustively (revision d764c73) with/without FMA:
+       0x1.01p+15 <= x < 2^16
+    */
     static const double cl[] = {0x1.7a0ed2effdd1p-67, -0x1.000000017d048p-2};
     double z = 1/(x*x);
     g = cl[0] + z*cl[1];

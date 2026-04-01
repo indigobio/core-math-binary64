@@ -26,7 +26,9 @@ SOFTWARE.
 */
 
 #include <stdint.h>
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
+#endif
 #include <fenv.h> // for feraiseexcept, FE_INVALID
 #include <math.h> // needed to provide cospi() since glibc does not have it
 

@@ -33,7 +33,9 @@ SOFTWARE.
 
 #include <stdint.h>
 #include <math.h> // needed for atan()
+#ifdef CORE_MATH_SUPPORT_ERRNO
 #include <errno.h>
+#endif
 
 // Warning: clang also defines __GNUC__
 #if defined(__GNUC__) && !defined(__clang__)
