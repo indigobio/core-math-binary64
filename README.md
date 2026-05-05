@@ -6,7 +6,7 @@ builds on Linux, macOS, and Windows.
 
 The implementation is a snapshot of the `src/binary64` directory of the
 [CORE-MATH](https://core-math.gitlabpages.inria.fr) project at commit
-`93d9f3bab7561cfb62f746f7e70c0888bb5c9a00` from 2026-03-28, with the build and testing
+`a82301814c69f562ad75d040113825c5177bcff4` from 2026-04-30, with the build and testing
 infrastructure removed. The function sources are otherwise unchanged.
 
 The `lgamma` function is omitted because Windows' `math.h` does not provide `signgam`.

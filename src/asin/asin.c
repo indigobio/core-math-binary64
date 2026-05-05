@@ -92,12 +92,6 @@ static inline double fastsum(double xh, double xl, double yh, double yl, double 
   return sh;
 }
 
-static inline double fasttwosub(double x, double y, double *e){
-  double s = x - y;
-  *e = (x - s) - y;
-  return s;
-}
-
 static inline double muldd(double xh, double xl, double ch, double cl, double *l){
   double ahhh = ch*xh;
   *l = (cl*xh + ch*xl) + __builtin_fma(ch, xh, -ahhh);
@@ -193,7 +187,7 @@ double cr_asin(double x){
 
   b64u64_u ix = {.f = x};
   u64 ax = ix.u<<1;
-  double t,z,zl,jd,f0h,f0l;
+  double t,z,zl,jd,f0h,f0l,eps;
   if(ax>0x7fc0000000000000ull){ // |x|>0.5
     static const double off[][2] = {
       {0x1.921fb54442d18p+0, 0x1.1a62633145c07p-54}, {-0x1.921fb54442d18p+0, -0x1.1a62633145c07p-54}
@@ -209,17 +203,29 @@ double cr_asin(double x){
 #endif
       return 0./0.; // |x|>1
     }
-    // for x>0.5 we use range reduction for double angle formula
+    // for |x|>0.5 we use range reduction for double angle formula
     // asin(x) = pi/2 - 2*asin(sqrt((1-x)/2)) and for x<-0.5 acos(x) = -pi/2 +
     // 2*asin(sqrt((1-|x|)/2))
+    /* exhaustive search done for 0.25 <= x < 1 with and without FMA
+       contraction. In progress:
+       [2^-3,2^-2): explor
+       [2^-4,2^-3): done
+    */
     t = 2 - 2*__builtin_fabs(x);
     jd = roundeven_finite(t*0x1p5);
     z = __builtin_copysign(__builtin_sqrt(t), -x);
     zl = __builtin_fma(z,z,-t)*((-0.5/t)*z);
     t = 0.25*t - jd*0x1p-7;
+    // fails with 0x1.98p-52 and x=0x1.3f47056fc030ap-1 (rndz, no fma)
+    eps = __builtin_fabs(z*t)*0x1.99p-52;
   } else { // |x|<=0.5
     // for |x| < 0x1.7137449123ef6p-26 |asin(x) - x| is less than half of ulp of asin(x)
-    if(__builtin_expect(ax<0x7cae26e892247decull, 0)) return __builtin_fma(0x1p-55,x,x);
+    if(__builtin_expect(ax<0x7cae26e892247decull, 0)) {
+#ifdef CORE_MATH_SUPPORT_ERRNO
+      if(__builtin_fabs(x) < 0x1p-1022 && x != 0.0) errno = ERANGE; // underflow
+#endif
+      return __builtin_fma(0x1p-55,x,x);
+    }
     f0h = 0;
     f0l = 0;
     t = x*x;
@@ -227,6 +233,8 @@ double cr_asin(double x){
     t = __builtin_fma(x,x,-0x1p-7*jd);
     z = x;
     zl = 0;
+    // fails for 0x1.0dp-52 with x=0x1.468fa00146735p-4 (rndz, no FMA)
+    eps = __builtin_fabs(z*t)*0x1.0ep-52;
   }
   // asin(xh+xl) = (xh + xl)*(cc[j][0] + (cc[j][1] + t*Poly(t, cc[j]+2)))
   // where t = xh^2 - j/128 and j = round(128*xh^2)
@@ -236,7 +244,6 @@ double cr_asin(double x){
   double fh = c[0], fl = c[1] + d;
   fh = muldd(z,zl, fh,fl, &fl);
   fh = fastsum(f0h,f0l, fh,fl, &fl);
-  double eps = __builtin_fabs(z*t)*0x1.962p-52 + 0x1p-100;
   double lb = fh + (fl - eps), ub = fh + (fl + eps);
   if(__builtin_expect(lb!=ub, 0)) return as_asin_refine(x, lb);
   return lb;
@@ -247,16 +254,23 @@ double as_asin_refine(double x, double phi){
   // Using angle rotation formula bring the argument close to zero
   // where the asin Taylor expansion works well.
   double s2 = x*x, dx2 = __builtin_fma(x,x,-s2);
-  double c2l, c2h = fasttwosub(1.0,s2,&c2l);
+  // s2+dx2 = x^2
+  double c2l, c2h = fasttwosum(1.0,-s2,&c2l);
   c2l -= dx2;
   c2h = fasttwosum(c2h,c2l,&c2l);
+  // c2h+c2l approximates 1-x^2
 
-  double c2f = __builtin_fma(x,-x,1);
-  double ch = __builtin_sqrt(c2f);
-  double cl = (c2l - __builtin_fma(ch,ch,-c2f))*((0.5/c2f)*ch);
+  double ch = __builtin_sqrt(c2h);
+  /* let eps = ch^2-c2h, then c2h + c2l = ch^2 + c2l - eps,
+     thus sqrt(c2h + c2l) = sqrt(ch^2*(1+(c2l-eps)/ch^2))
+     ~ ch*(1 + (c2l-eps)/ch^2/2) = ch + (c2l-eps)/ch/2 */
+  double cl = (c2l - __builtin_fma(ch,ch,-c2h))*(0.5/ch);
+  // now ch+cl approximates sqrt(1-x^2)
 
   int64_t jf = roundeven_finite(__builtin_fabs(phi) * 0x1.45f306dc9c883p+4);
-  // sin(pi/64*j) in the double-double format
+  // jf = round(|phi|*64/pi)
+  // sin(pi/64*j) in the double-double format (smallest term first)
+  // this is the same table as in acos.c
   static const double s[33][2] = {
     {0x0p+0, 0x0p+0}, {-0x1.912bd0d569a9p-61, 0x1.91f65f10dd814p-5},
     {-0x1.e2718d26ed688p-60, 0x1.917a6bc29b42cp-4}, {0x1.13000a89a11ep-58, 0x1.2c8106e8e613ap-3},
@@ -283,10 +297,11 @@ double as_asin_refine(double x, double phi){
   double dsh = ax - Sh, dsl = -Sl;
   double dch = ch - Ch, dcl = cl - Cl;
 
-  double Sc = __builtin_fma(Sh, dch, 0x1.8p-4) - 0x1.8p-4;
+#define MAGIC 0x1.8p-4
+  double Sc = __builtin_fma(Sh, dch, MAGIC) - MAGIC;
   double dSc = __builtin_fma(Sh, dch, -Sc);
 
-  double Cs = __builtin_fma(Ch, dsh, 0x1.8p-4) - 0x1.8p-4;
+  double Cs = __builtin_fma(Ch, dsh, MAGIC) - MAGIC;
   double dCs = __builtin_fma(Ch, dsh, -Cs);
 
   double v = Cs - Sc;
@@ -294,7 +309,7 @@ double as_asin_refine(double x, double phi){
   v = fasttwosum(v,dv,&dv);
   double sgn = __builtin_copysign(1.0, x), jt = jf*sgn;
   // 0 <= jt <= 64
-  static const double c[][2] = {
+  static const double c[][2] = { // same table as in acos.c
     {0x1p+0, -0x1.fc2c76456515bp-108}, {0x1.5555555555555p-3, 0x1.5555555623513p-57},
     {0x1.3333333333333p-4, 0x1.9997e3427441bp-59}, {0x1.6db6db6db6db7p-5, -0x1.cb95ff08658e6p-62},
     {0x1.f1c71c71c6d5bp-6, 0x1.b125bccdcc89ep-60}};
@@ -318,49 +333,59 @@ double as_asin_refine(double x, double phi){
   tn.u = (th.u&(0x7ffull<<52)) - (53ull<<52);
   tl.u &= ~0ull>>1;
   long dn = tl.u-tn.u, de = (tn.u - tl.u)>>52;
-  int hard = (-2<=dn && dn<=0) || (de>46);
+  // dn=-2 for x=0x1.c373ff4aad79bp-14 (rndn)
+  // de=48 for x=0x1.da4e0e6c717a5p-2 (rndz)
+  int hard = (-2<=dn && dn<=0) || (de>47);
   double res = ph + pl;
-  if(hard) res = as_asin_database(x,res);
+  if (hard) res = as_asin_database(x,res);
   return res;
 }
 
 double as_asin_database(double x, double f){
-  static const uint64_t xdb[] = {
-    0x3e57137449123ef6, 0x3e5d12ed0af1a27e, 0x3e851c4b960778f5, 0x3e93cfc2a006a414,
-    0x3e9cbaa95dadb559, 0x3ebacd69f89ad8f1, 0x3ef2bffffffc233b, 0x3efff0f3022b2e9d,
-    0x3f13217783d70d1d, 0x3f1c373ff4aad79b, 0x3f6b3f28593cad2f, 0x3f8e17b3f6bb5e6e,
-    0x3f941d60a76a82ed, 0x3f9921c0a0486537, 0x3f9a3a2919d6b19b, 0x3f9d6315f7ee7e01,
-    0x3f9ea6fdc56fc61a, 0x3fa69768dc89bb00, 0x3faa4816b2066707, 0x3fad77b117f230d6,
-    0x3fafc7a07b2549aa, 0x3fb2df0542154f1b, 0x3fb51cf5db1b1956, 0x3fc9697cb602c582,
-    0x3fcd0ef799001ba9, 0x3fd4a8e1a96e38e3, 0x3fdda4e0e6c717a5, 0x3fdea8e8fdf47549,
-    0x3fe3b9994abb81d4,
+  // xdb[] is 64-bit encoding of |x| for x exceptional cases
+  // sorted by increasing first values
+  // those marked with * are required only without FMA contraction
+  static const double db[][3] = {
+    {0x1.7137449123ef6p-26, 0x1.7137449123ef7p-26, -0x1.fffffffffffffp-80},
+    {0x1.d12ed0af1a27ep-26, 0x1.d12ed0af1a27fp-26, -0x1.63676aa7969aap-134},
+    {0x1.51c4b960778f5p-23, 0x1.51c4b9607790dp-23, 0x1.fffffffffffffp-77},
+    {0x1.3cfc2a006a414p-22, 0x1.3cfc2a006a465p-22, -0x1.1e68bc303367cp-131},
+    {0x1.cbaa95dadb559p-22, 0x1.cbaa95dadb65p-22, 0x1.742593ef4c3d3p-128},
+    {0x1.acd69f89ad8f1p-20, 0x1.acd69f89ae57ap-20, 0x1.b0ddfe3e29b3cp-126},
+    {0x1.2bffffffc233bp-16, 0x1.2c00000006dddp-16, -0x1.1c26f2054c23p-122},
+    {0x1.ff0f3022b2e9dp-16, 0x1.ff0f3024065e7p-16, -0x1.ffffffffffffep-70},
+    {0x1.3217783d70d1dp-14, 0x1.32177841ffbefp-14, -0x1.fffffffffffffp-68},
+    {0x1.c373ff4aad79bp-14, 0x1.c373ff594d65bp-14, -0x1.fffffffffffffp-68},
+    {0x1.b3f28593cad2fp-9, 0x1.b3f2ba40dbc66p-9, -0x1.27ca20c684481p-116},
+    {0x1.e17b3f6bb5e6ep-7, 0x1.e17faefac7797p-7, -0x1.15a1c95184d1bp-112},
+    {0x1.41d60a76a82edp-6, 0x1.41db571d96126p-6, -0x1.df34bcdacf353p-114},
+    {0x1.921c0a0486537p-6, 0x1.9226605233224p-6, -0x1.38e672f1696d5p-108},
+    {0x1.9c360a8dd681ap-6, 0x1.9c412d62c144p-6, 0x1.1edd261167bafp-110}, // *
+    {0x1.d6315f7ee7e01p-6, 0x1.d641e6d5e769ap-6, -0x1.af7dec023f5b9p-109}, // *
+    {0x1.ea6fdc56fc61ap-6, 0x1.ea829e3e988e5p-6, -0x1.f358e90326f9ap-109},
+    {0x1.2749dc4d19c6dp-5, 0x1.275a3d78c01ecp-5, 0x1.49ab71c17bd11p-110},
+    {0x1.69768dc89bbp-5, 0x1.69949b3d51fb1p-5, -0x1.14b91318650e8p-113},
+    {0x1.a4816b2066707p-5, 0x1.a4b0bfb0454d5p-5, 0x1.fffffffffffffp-59},
+    {0x1.d77b117f230d6p-5, 0x1.d7bdcd778049fp-5, 0x1.aafc31a59e093p-114},
+    {0x1.fc7a07b2549aap-5, 0x1.fccdc252cad1fp-5, -0x1.dc02fdac5159ap-109}, // *
+    {0x1.2df0542154f1bp-4, 0x1.2e36813a9874p-4, -0x1.63abaa885a4dap-108},
+    {0x1.51cf5db1b1956p-4, 0x1.5231b416ba885p-4, -0x1.e1e3f45d0bec3p-108},
+    {0x1.d0ef799001ba9p-3, 0x1.d5064e6fe82c5p-3, -0x1.84b9ecb11e241p-109},
+    {0x1.4a8e1a96e38e3p-2, 0x1.50954b7bbf87bp-2, -0x1.b9f88cfb1ef42p-108},
+    {0x1.ceee68154d1c9p-2, 0x1.e05b0e0a809bcp-2, 0x1.117d6aecd2594p-107}, // *
+    {0x1.da4e0e6c717a5p-2, 0x1.ed25c5eb8c916p-2, -0x1.89e120e5744a5p-109},
+    {0x1.e9950730c4696p-2, 0x1.fe767739d0f6dp-2, 0x1.16376667a73f3p-120},
   };
-  static const double ydb[] = {
-    0x1.7137449123ef7p-26, 0x1.d12ed0af1a27fp-26, 0x1.51c4b9607790dp-23, 0x1.3cfc2a006a465p-22,
-    0x1.cbaa95dadb65p-22, 0x1.acd69f89ae57ap-20, 0x1.2c00000006dddp-16, 0x1.ff0f3024065e7p-16,
-    0x1.32177841ffbefp-14, 0x1.c373ff594d65bp-14, 0x1.b3f2ba40dbc66p-9, 0x1.e17faefac7797p-7,
-    0x1.41db571d96126p-6, 0x1.9226605233224p-6, 0x1.a3ae514c9befap-6, 0x1.d641e6d5e769ap-6,
-    0x1.ea829e3e988e5p-6, 0x1.69949b3d51fb1p-5, 0x1.a4b0bfb0454d5p-5, 0x1.d7bdcd778049fp-5,
-    0x1.fccdc252cad1fp-5, 0x1.2e36813a9874p-4, 0x1.5231b416ba885p-4, 0x1.994ffb5daf0f9p-3,
-    0x1.d5064e6fe82c5p-3, 0x1.50954b7bbf87bp-2, 0x1.ed25c5eb8c916p-2, 0x1.ff92a8ca216cdp-2,
-    0x1.540e24e5f33f3p-1,
-  };
-  const int signs = 0x1f73ffcb;
-  b64u64_u t = {.f = x};
-  uint64_t ax = t.u & (~0ul>>1);
-  int a = 0, b = sizeof(xdb)/sizeof(xdb[0]) - 1, m = (a + b)/2;
-  while (a <= b) { // binary search
-    if (xdb[m] < ax)
-      a = m + 1;
-    else if (xdb[m] == ax) {
-      t.f = ydb[m];
-      t.u -= 54ull<<52;
-      t.u |= ((signs>>m)&1ull)<<63;
-      f = __builtin_copysign(ydb[m],x) + __builtin_copysign(1,x)*t.f;
-      break;
-    } else
-      b = m - 1;
-    m = (a + b)/2;
+  double ax = __builtin_fabs (x);
+  int a = 0, b = sizeof(db)/sizeof(db[0]);
+  while (a + 1 < b) { // binary search with invariant db[a][0] <= x < db[b][0]
+    int m = (a + b) / 2;
+    if (db[m][0] <= ax)
+      a = m;
+    else
+      b = m;
   }
-  return f;
+  return (db[a][0] == ax) ?
+    (x > 0) ? db[a][1] + db[a][2] : -db[a][1] - db[a][2]
+    : f;
 }

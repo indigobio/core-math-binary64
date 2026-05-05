@@ -140,6 +140,11 @@ static inline double polydd(double xh, double xl, int n, const double c[][2], do
   return ch;
 }
 
+/* Return ch+cl, a double-double approximation of
+   c[0] + c[1]*x + ... + (c[n-1] + l)*x^(n-1)
+   where each c[i] is a double-double number,
+   with c[i][0] the upper part, and c[i][1] the lower part.
+   cl is put in l at output (l is used both in input and output). */
 static inline double polyddd(double x, int n, const double c[][2], double *l){
   int i = n-1;
   double cl, ch = fasttwosum(c[i][0], *l, &cl); cl += c[i][1];
@@ -689,7 +694,7 @@ double cr_tgamma(double x){
     c0 += x4*c4;
     c8 += x4*c12;
     double cl = x*(c0 + x8*c8);
-    double ch = polyddd(x, 5,cc, &cl);
+    double ch = polyddd(x, 5, cc, &cl);
     double fh = 1.0/z, fl = __builtin_fma(fh,-z,1.0)*fh;
     fh = fastsum(fh,fl, ch,cl, &fl);
     double eps = fh*(3.5e-19 + (x2*x4)*4e-15);
@@ -820,7 +825,7 @@ double cr_tgamma(double x){
   double d = z - (i + 3.5);
   double d2 = d*d, d4 = d2*d2;
   double fl = d*((c[10] + d*c[11]) + d2*(c[12] + d*c[13]) + d4*((c[14] + d*c[15]) + d2*(c[16] + d*c[17])));
-  double fh = polyddd(d, 10,cc, &fl);
+  double fh = polyddd(d, 10, cc, &fl);
   int jm = __builtin_fabs(i);
   double wh = 1, wl = 0;
   double xph = z, xpl = 0;

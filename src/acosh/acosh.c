@@ -184,7 +184,7 @@ double cr_acosh(double x){
 #ifdef CORE_MATH_SUPPORT_ERRNO
       errno = EDOM;
 #endif
-      return __builtin_nan("x<1");
+      return 0.0 / 0.0; // return sNaN and raises invalid
   }
 
   if(__builtin_expect((int64_t)ix.u<=0x3ff0000000000000ll, 0)){
@@ -192,7 +192,7 @@ double cr_acosh(double x){
 #ifdef CORE_MATH_SUPPORT_ERRNO
     errno = EDOM;
 #endif
-    return __builtin_nan("x<1");
+    return 0.0 / 0.0; // return sNaN and raises invalid
   }
   double g;
   int off = 0x3fe;

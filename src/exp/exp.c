@@ -97,6 +97,10 @@ static inline double muldd(double xh, double xl, double ch, double cl, double *l
   return ahhh;
 }
 
+/* FIXME: when FMA is available in hardware, use Algorithm FASTFMA_DW
+   from https://inria.hal.science/hal-05517451 which claims a 12%
+   improvement on the accurate path.
+*/
 static inline double opolydd(double xh, double xl, int n, const double c[][2], double *l){
   int i = n-1;
   double ch = c[i][0], cl = c[i][1];

@@ -46,6 +46,8 @@ typedef unsigned _BitInt(128) u128;
 typedef unsigned __int128 u128;
 #endif
 
+/* The dint64_t structure represents a 128-bit number:
+   (-1)^sgn*(hi/2^64+lo/2^128)*2^ex */
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 typedef union {
   struct {
@@ -447,7 +449,7 @@ static const uint64_t T[20] = {
 
 /* Table containing 128-bit approximations of sin2pi(i/2^11) for 0 <= i < 256
    (to nearest).
-   Each entry is to be interpreted as (hi/2^64+lo/2^128)*2^ex*(-1)*sgn.
+   Each entry is to be interpreted as (hi/2^64+lo/2^128)*2^ex*(-1)^sgn.
    Generated with computeS() from sin.sage. */
 static const dint64_t S[256] = {
   {.hi = 0x0, .lo = 0x0, .ex = 128, .sgn=0},
@@ -1339,7 +1341,9 @@ evalPSfast (double *h, double *l, double xh, double xl, double uh, double ul)
    for 2^-24 <= xh+xl < 2^-11 + 2^-24,
    and |xl| < 2^-52.36, with relative error < 2^-69.96
    (see evalPCfast() in sin.sage).
-   Assume uh + ul approximates (xh+xl)^2. */
+   Assume uh + ul approximates (xh+xl)^2.
+   Since cos2pi() is even, there is no need
+   to pass xh,xl to this function. */
 static void
 evalPCfast (double *h, double *l, double uh, double ul)
 {
