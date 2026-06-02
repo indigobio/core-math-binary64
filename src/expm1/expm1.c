@@ -359,8 +359,8 @@ static double __attribute__((noinline)) as_expm1_accurate(double x){
 double cr_expm1(double x){
   b64u64_u ix = {.f = x};
   u64 aix = ix.u & (~(u64)0>>1);
-  if(__builtin_expect(aix < 0x3fd0000000000000ull, 1)){
-    if( __builtin_expect(aix < 0x3ca0000000000000ull, 0)) {
+  if(__builtin_expect(aix < 0x3fd0000000000000ull, 1)){ // |x| < 0.25
+    if( __builtin_expect(aix < 0x3ca0000000000000ull, 0)) { // |x| < 2^-53
       if( !aix ) return x;
       double res = __builtin_fma(0x1p-54, __builtin_fabs(x), x);
 #ifdef CORE_MATH_SUPPORT_ERRNO
@@ -384,16 +384,17 @@ double cr_expm1(double x){
     double ub = fh + (fl + eps), lb = fh + (fl - eps);
     if(__builtin_expect( ub != lb, 0)) return as_expm1_accurate(x);
     return lb;
-  } else {
+  } else { // |x| >= 0.25
     if(__builtin_expect(aix>=0x40862e42fefa39f0ull, 0)){
+      // |x| >= 0x1.62e42fefa39fp+9
       if(aix>0x7ff0000000000000ull) return x + x; // nan
-      if(aix==0x7ff0000000000000ull){
-	if(ix.u>>63)
+      if(aix==0x7ff0000000000000ull){ // +/-inf
+	if(ix.u>>63) // -inf
 	  return -1.0;
 	else
-	  return x;
+	  return x; // +inf
       }
-      if(!(ix.u>>63)){
+      if(!(ix.u>>63)){ // x >= 0x1.62e42fefa39fp+9
 #ifdef CORE_MATH_SUPPORT_ERRNO
         errno = ERANGE; // overflow
 #endif
@@ -402,11 +403,13 @@ double cr_expm1(double x){
       }
     }
     if(__builtin_expect(ix.u>=0xc0425e4f7b2737faull, 0)){
-      if(ix.u>=0xc042b708872320e2ull) return -1.0 + 0x1p-55;
+      // x <= -0x1.25e4f7b2737fap+5
+      if(ix.u>=0xc042b708872320e2ull) // x <= -0x1.2b708872320e2p+5
+	return -1.0 + 0x1p-55;
       return (0x1.25e4f7b2737fap+5 + x + 0x1.8486612173c69p-51)*0x1.71547652b82fep-54 - 0x1.fffffffffffffp-1;
     }
 
-    const double s = 0x1.71547652b82fep+12;
+    const double s = 0x1.71547652b82fep+12; // s approximates 2^12/log(2)
     double t = roundeven_finite(x*s);
     i64 jt = t, i0 = (jt>>6)&0x3f, i1 = jt&0x3f, ie = jt>>12;
     double t0h = t0[i0][1], t0l = t0[i0][0];

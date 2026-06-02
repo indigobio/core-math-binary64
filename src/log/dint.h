@@ -282,6 +282,8 @@ static inline void print_dint(const dint64_t *a) {
   Approximation tables
 */
 
+/* _INVERSE_2[128+i] is an approximation of 1/(1+i/2^8), where an entry
+   (hi,lo,ex,sgn) represents (-1)^sgn*(hi+lo/2^64)*2^(ex-63) */
 static const dint64_t _INVERSE_2[] = {
     {.hi = 0x8000000000000000, .lo = 0x0,  .ex = 1, .sgn = 0x0},
     {.hi = 0xfe03f80fe03f80ff, .lo = 0x0,  .ex = 0, .sgn = 0x0},
@@ -525,6 +527,8 @@ static const dint64_t _INVERSE_2[] = {
     {.hi = 0xb2927c29da5519d0, .lo = 0x0, .ex = -1, .sgn = 0x0},
 };
 
+/* _LOG_INV_2[128+i] is an approximation of -log(1/(1+i/2^8)), where an entry
+   (hi,lo,ex,sgn) represents (-1)^sgn*(hi+lo/2^64)*2^(ex-63) */
 static const dint64_t _LOG_INV_2[] = {
     {.hi = 0xb17217f7d1cf79ab, .lo = 0xc9e3b39803f2f6af,  .ex = -1, .sgn = 0x1},
     {.hi = 0xaf74155120c9011d,  .lo = 0x46d235ee63073dc,  .ex = -1, .sgn = 0x1},
