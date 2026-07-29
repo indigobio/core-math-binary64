@@ -66,7 +66,7 @@ if (MSVC)
   set_property(TARGET crmath PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 else ()
   # GCC and Clang
-  target_compile_options(crmath PRIVATE -O2 -fno-fast-math -ffp-contract=off)
+  target_compile_options(crmath PRIVATE -O2 -frounding-math -fno-fast-math -ffp-contract=off)
 endif ()
 
 include(GNUInstallDirs)

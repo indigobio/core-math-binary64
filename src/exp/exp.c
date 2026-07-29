@@ -97,19 +97,50 @@ static inline double muldd(double xh, double xl, double ch, double cl, double *l
   return ahhh;
 }
 
-/* FIXME: when FMA is available in hardware, use Algorithm FASTFMA_DW
-   from https://inria.hal.science/hal-05517451 which claims a 12%
-   improvement on the accurate path.
+/* This routine implements Algorithm 4 from
+   "Extended-Precision FMA under Parameterized Double-Word Overlap:
+   Tight Error Bounds and Examples by Claude-Pierre Jeannerod, Mioara Joldes,
+   Nicolas Louvet, Jean-Michel Muller, published in the proceedings of
+   Arith 2026, https://inria.hal.science/hal-05517451.
+
+   The original algorithm is however slower when there is no FMA in hardware.
+   Here are some timings of perf.sh with the fast path disabled on a
+   AMD EPYC 7282 with gcc 15.3.0.
+
+   With FMA contraction:    68.7 cycles -> 55.7 cycles
+   Without FMA contraction: 129.6 cycles -> 192.2 cycles
+
+   To mitigate this slowdown, with respect to the original Algorithm,
+   we replaced g = __builtin_fma (ah, bl, f) below by g = ah * bl + f,
+   and *l = __builtin_fma (al, bh, g) by *l = al * bh + g. If an FMA is
+   available in hardware, g = ah * bl + f is compiled using an FMA;
+   otherwise, it is compiled as a multiplication and an addition.
+   This yields:
+
+   With FMA contraction:    68.7 cycles -> 55.7 cycles
+   Without FMA contraction: 129.6 cycles -> 130.6 cycles
 */
+static inline double
+FastFMA_DW (double ah, double al, double bh, double bl, double ch, double cl,
+            double *l)
+{
+  double dh = __builtin_fma (ah, bh, ch);
+  double t = ch - dh;
+  double e = __builtin_fma (ah, bh, t);
+  double f = e + cl;
+  // double g = __builtin_fma (ah, bl, f); // original algorithm
+  double g = ah * bl + f;
+  // *l = __builtin_fma (al, bh, g); // original algorithm
+  *l = al * bh + g;
+  // *l is dl in the paper
+  return dh;
+}
+
 static inline double opolydd(double xh, double xl, int n, const double c[][2], double *l){
   int i = n-1;
   double ch = c[i][0], cl = c[i][1];
-  while(--i>=0){
-    ch = muldd(xh,xl, ch,cl, &cl);
-    double th = ch + c[i][0], tl = (c[i][0] - th) + ch;
-    ch = th;
-    cl += tl + c[i][1];
-  }
+  while(--i>=0)
+    ch = FastFMA_DW (xh, xl, ch, cl, c[i][0], c[i][1], &cl);
   *l = cl;
   return ch;
 }
