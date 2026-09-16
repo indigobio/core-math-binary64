@@ -29,8 +29,7 @@ SOFTWARE.
 #define CR_POW_H
 
 #include <stdint.h>
-
-#include <math.h>
+#include <math.h> // needed for NAN and INFINITY
 #include <errno.h>
 
 /*
@@ -84,7 +83,9 @@ roundeven_finite (double x)
     union { double f; uint64_t n; } u, v;
     u.f = ix;
     v.f = ix - __builtin_copysign (1.0, x);
-    if (__builtin_ctz (v.n) > __builtin_ctz (u.n))
+    /* Warning: v.n is 0 when x=0.5; while u.n cannot be zero since ix
+       is rounded away from zero. */
+    if (v.n == 0 || __builtin_ctzll (v.n) > __builtin_ctzll (u.n))
       ix = v.f;
   }
 # endif
@@ -305,7 +306,7 @@ static inline double dint_tod(dint64_t *a, int exact) {
   if (__builtin_expect (a->ex < -1022, 0))
     return dint_tod_subnormal (a, exact);
 
-  // r is the significant in [1,2)
+  // r is the significand in [1,2)
   f64_u r = {.u = (a->hi >> 11) | (0x3ffll << 52)};
 
   // round r

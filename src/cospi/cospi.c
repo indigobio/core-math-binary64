@@ -1,6 +1,6 @@
 /* Correctly-rounded cosine of binary64 value for angles in half-revolutions
 
-Copyright (c) 2023-2025 Alexei Sibidanov.
+Copyright (c) 2023-2026 Alexei Sibidanov <sibid@uvic.ca>.
 
 This file is part of the CORE-MATH project
 (https://core-math.gitlabpages.inria.fr/).
@@ -176,7 +176,14 @@ double cr_cospi(double x){
   }
   
   int32_t si = e-1011;
-  if(__builtin_expect(si>=0 && (((uint64_t)m<<si)^0x8000000000000000ll)==0, 0)) return 0.0;
+  if(__builtin_expect(si>=0&&(m<<(si+1))==0, 0)) { // x is integer or half-integer
+    if ((m<<si) == 0){ // x is integer
+      int t = (m<<(si-1))>>63;
+      // t = 0 if |x| = 1/2 mod 2, t = 1 if |x| = 3/2 mod 2
+      return t?-1.0:1.0;
+    }
+    return 0.0;
+  }
 
   uint64_t iq = ((m>>s) + 2048)&8191;
   iq = (iq + 1)>>1;
@@ -185,7 +192,7 @@ double cr_cospi(double x){
   double fs = sn[0] + z2*(sn[1] + z2*sn[2]);
   double fc = cn[0] + z2*cn[1];
   double sh,sl,ch,cl; sincosn(iq,&sh,&sl,&ch,&cl);
-  double er = z*0x1p-123;
+  double er = __builtin_fabs(z)*0x1p-123 + 0x1p-78;
   double r = sl + sh*(z2*fc) + ch*(z*fs);
   double lb = (r - er) + sh, ub = (r + er) + sh;
   if(__builtin_expect(lb == ub, 1)) return lb;

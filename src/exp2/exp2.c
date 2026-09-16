@@ -1,6 +1,6 @@
 /* Correctly rounded exp2 function for binary64 values.
 
-Copyright (c) 2023-2025 Alexei Sibidanov.
+Copyright (c) 2023-2026 Alexei Sibidanov <sibid@uvic.ca>.
 
 This file is part of the CORE-MATH project
 (https://core-math.gitlabpages.inria.fr/).
@@ -67,7 +67,9 @@ roundeven_finite (double x)
     union { double f; uint64_t n; } u, v;
     u.f = ix;
     v.f = ix - __builtin_copysign (1.0, x);
-    if (__builtin_ctz (v.n) > __builtin_ctz (u.n))
+    /* Warning: v.n is 0 when x=0.5; while u.n cannot be zero since ix
+       is rounded away from zero. */
+    if (v.n == 0 || __builtin_ctzll (v.n) > __builtin_ctzll (u.n))
       ix = v.f;
   }
 # endif
@@ -118,7 +120,7 @@ static inline double polydd(double xh, int n, const double c[][2], double *l){
 
 static inline double as_ldexp(double x, i64 i){
 #ifdef __x86_64__
-  __m128i sb = {(i64)i<<52, 0};
+  __m128i sb = {(u64)i<<52, 0};
 #if defined(__clang__)
   __m128d r = _mm_set_sd(x);
 #else
@@ -355,7 +357,7 @@ double cr_exp2(double x){
   static const double c[] =
     {0x1.62e42fefa39efp-13, 0x1.ebfbdff82c58fp-27, 0x1.c6b08d73b3e01p-41, 0x1.3b2ab6fdda001p-55};
   double tz = th*z, fh = th, fl = tz*((c[0] + z*c[1]) + z2*(c[2] + z*c[3])) + tl;
-  double eps = 1.64e-19;
+  double eps = 0x1.fdp-63;
   if(__builtin_expect(ix.u<=0xc08ff00000000000ull, 1)){ // x >= -1022
     // warning: on 32-bit machines, __builtin_expect(frac,1) does not work
     // since only the low 32 bits of frac are taken into account

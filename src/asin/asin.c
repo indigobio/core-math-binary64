@@ -67,7 +67,9 @@ roundeven_finite (double x)
     union { double f; uint64_t n; } u, v;
     u.f = ix;
     v.f = ix - __builtin_copysign (1.0, x);
-    if (__builtin_ctz (v.n) > __builtin_ctz (u.n))
+    /* Warning: v.n is 0 when x=0.5; while u.n cannot be zero since ix
+       is rounded away from zero. */
+    if (v.n == 0 || __builtin_ctzll (v.n) > __builtin_ctzll (u.n))
       ix = v.f;
   }
 # endif
@@ -230,8 +232,8 @@ double cr_asin(double x){
     t = __builtin_fma(x,x,-0x1p-7*jd);
     z = x;
     zl = 0;
-    // fails for 0x1.0fp-52 with x=0x1.fa3c79a3c19abp-3 (rndz, no FMA)
-    eps = __builtin_fabs(z*t)*0x1.10p-52;
+    // fails for 0x1.46p-52 with x=0x1.fda1c6766d903p-2 (rndz, no FMA)
+    eps = __builtin_fabs(z*t)*0x1.47p-52;
   }
   // asin(xh+xl) = (xh + xl)*(cc[j][0] + (cc[j][1] + t*Poly(t, cc[j]+2)))
   // where t = xh^2 - j/128 and j = round(128*xh^2)

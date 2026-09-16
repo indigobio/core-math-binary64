@@ -66,7 +66,9 @@ roundeven_finite (double x)
     union { double f; uint64_t n; } u, v;
     u.f = ix;
     v.f = ix - __builtin_copysign (1.0, x);
-    if (__builtin_ctz (v.n) > __builtin_ctz (u.n))
+    /* Warning: v.n is 0 when x=0.5; while u.n cannot be zero since ix
+       is rounded away from zero. */
+    if (v.n == 0 || __builtin_ctzll (v.n) > __builtin_ctzll (u.n))
       ix = v.f;
   }
 # endif
@@ -716,7 +718,7 @@ double cr_tgamma(double x){
   double fx = __builtin_floor(x);
   /* compute k only after the overflow check, otherwise the cast to integer
      might overflow */
-  int64_t k = fx;
+  int64_t k;
   if(__builtin_expect(fx==x, 0)){ /* x is integer */
     if(x == 0.0){
 #ifdef CORE_MATH_SUPPORT_ERRNO
@@ -730,6 +732,7 @@ double cr_tgamma(double x){
 #endif
       return 0.0 / 0.0; /* should raise the "Invalid operation" exception */
     }
+    k = fx;
     double t0h = 1, t0l = 0, x0 = 1;
     for(int i=1; i<k; i++, x0 += 1.0) t0h = mulddd(x0, t0h,t0l, &t0l);
     return t0h + t0l;
@@ -743,6 +746,7 @@ double cr_tgamma(double x){
        errno is set to ERANGE. */
     errno = ERANGE;
 #endif
+    k = fx < (double) INT64_MIN ? INT64_MIN : fx;
     return 0x1p-1022 * sgn[k&1];
   }
 
@@ -759,7 +763,7 @@ double cr_tgamma(double x){
       rh = -rh;
       rl = -rl;
     }
-    double eps = rh*(6.5e-21 - x*1.46e-22);
+    double eps = rh*(8.7e-21 - x*1.46e-22);
     b64u64_u th;
     if(__builtin_expect(ip>=-170,1)){ // -171 < x < -3
       // rev. 221543c fails for 0.617*eps with x=-0x1.001ee4721504bp+3 (rndd)
@@ -796,7 +800,7 @@ double cr_tgamma(double x){
   if(x>4){
     double ll = 0, lh = as_lgamma_asym(x,&ll);
     int e; lh = as_expd(lh, &ll, &e);
-    double eps = lh*(2e-21 + x*1.5e-22);
+    double eps = lh*(2e-21 + x*1.84e-22);
     // revision 221543c fails for 0.686*eps with x=0x1.4ff0587da08e6p+7 (rndz)
     double ub = lh + (ll + eps), lb = lh + (ll - eps);
     if(ub != lb) return as_tgamma_accurate(x);
